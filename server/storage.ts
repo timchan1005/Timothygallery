@@ -52,6 +52,12 @@ try {
   if (!cols.some((c) => c.name === "cloudinary_public_id")) {
     sqlite.exec(`ALTER TABLE photos ADD COLUMN cloudinary_public_id TEXT`);
   }
+  if (!cols.some((c) => c.name === "resource_type")) {
+    sqlite.exec(`ALTER TABLE photos ADD COLUMN resource_type TEXT NOT NULL DEFAULT 'image'`);
+  }
+  if (!cols.some((c) => c.name === "duration")) {
+    sqlite.exec(`ALTER TABLE photos ADD COLUMN duration INTEGER`);
+  }
 } catch {
   // ignore
 }
@@ -65,7 +71,7 @@ export interface IStorage {
   createFolder(folder: InsertFolder): Promise<Folder>;
   renameFolder(id: number, name: string): Promise<Folder | undefined>;
   moveFolder(id: number, parentId: number | null): Promise<Folder | undefined>;
-  deleteFolderRecursive(id: number): Promise<{ folderIds: number[]; photoFilenames: string[]; cloudinaryIds: string[] }>;
+  deleteFolderRecursive(id: number): Promise<{ folderIds: number[]; photoFilenames: string[]; cloudinaryAssets: Array<{ publicId: string; resourceType: string }> }>;
   getFolderPath(id: number): Promise<Folder[]>; // breadcrumbs root -> folder
   // Photos
   listPhotos(folderId: number | null, opts?: { excludePaired?: boolean }): Promise<Photo[]>;
@@ -80,7 +86,7 @@ export interface IStorage {
   createPair(input: { name?: string | null; leftPhotoId: number; rightPhotoId: number; folderId: number | null }): Promise<PairWithPhotos>;
   renamePair(id: number, name: string | null): Promise<Pair | undefined>;
   movePair(id: number, folderId: number | null): Promise<PairWithPhotos | undefined>;
-  deletePair(id: number, removePhotos: boolean): Promise<{ filenamesRemoved: string[]; cloudinaryIdsRemoved: string[] }>;
+  deletePair(id: number, removePhotos: boolean): Promise<{ filenamesRemoved: string[]; cloudinaryAssetsRemoved: Array<{ publicId: string; resourceType: string }> }>;
   // Helper to look up which folders contain pairs (for recursive deletes)
 }
 
@@ -137,7 +143,7 @@ export class DatabaseStorage implements IStorage {
 
   async deleteFolderRecursive(
     id: number
-  ): Promise<{ folderIds: number[]; photoFilenames: string[]; cloudinaryIds: string[] }> {
+  ): Promise<{ folderIds: number[]; photoFilenames: string[]; cloudinaryAssets: Array<{ publicId: string; resourceType: string }> }> {
     // Collect descendants
     const toVisit = [id];
     const folderIds: number[] = [];
@@ -153,16 +159,25 @@ export class DatabaseStorage implements IStorage {
     }
     // Collect photos to delete and capture their filenames + Cloudinary IDs
     const photoFilenames: string[] = [];
-    const cloudinaryIds: string[] = [];
+    const cloudinaryAssets: Array<{ publicId: string; resourceType: string }> = [];
     for (const fId of folderIds) {
       const photoRows = db
-        .select({ filename: photos.filename, cloudinaryPublicId: photos.cloudinaryPublicId })
+        .select({
+          filename: photos.filename,
+          cloudinaryPublicId: photos.cloudinaryPublicId,
+          resourceType: photos.resourceType,
+        })
         .from(photos)
         .where(eq(photos.folderId, fId))
         .all();
       for (const p of photoRows) {
         photoFilenames.push(p.filename);
-        if (p.cloudinaryPublicId) cloudinaryIds.push(p.cloudinaryPublicId);
+        if (p.cloudinaryPublicId) {
+          cloudinaryAssets.push({
+            publicId: p.cloudinaryPublicId,
+            resourceType: p.resourceType ?? "image",
+          });
+        }
       }
       db.delete(photos).where(eq(photos.folderId, fId)).run();
       // also delete pairs that were anchored in this folder
@@ -172,7 +187,7 @@ export class DatabaseStorage implements IStorage {
     for (const fId of [...folderIds].reverse()) {
       db.delete(folders).where(eq(folders.id, fId)).run();
     }
-    return { folderIds, photoFilenames, cloudinaryIds };
+    return { folderIds, photoFilenames, cloudinaryAssets };
   }
 
   async getFolderPath(id: number): Promise<Folder[]> {
@@ -232,7 +247,7 @@ export class DatabaseStorage implements IStorage {
       .get();
   }
 
-  async deletePhoto(id: number): Promise<{ filename: string; cloudinaryPublicId: string | null } | undefined> {
+  async deletePhoto(id: number): Promise<{ filename: string; cloudinaryPublicId: string | null; resourceType: string } | undefined> {
     // If photo is part of a pair, dissolve the pair first (don't delete the partner)
     const ph = await this.getPhoto(id);
     if (!ph) return undefined;
@@ -242,7 +257,11 @@ export class DatabaseStorage implements IStorage {
       db.delete(pairs).where(eq(pairs.id, ph.pairId)).run();
     }
     db.delete(photos).where(eq(photos.id, id)).run();
-    return { filename: ph.filename, cloudinaryPublicId: ph.cloudinaryPublicId ?? null };
+    return {
+      filename: ph.filename,
+      cloudinaryPublicId: ph.cloudinaryPublicId ?? null,
+      resourceType: ph.resourceType ?? "image",
+    };
   }
 
   // ---------- Pairs ----------
@@ -337,11 +356,11 @@ export class DatabaseStorage implements IStorage {
     return this.getPair(id);
   }
 
-  async deletePair(id: number, removePhotos: boolean): Promise<{ filenamesRemoved: string[]; cloudinaryIdsRemoved: string[] }> {
+  async deletePair(id: number, removePhotos: boolean): Promise<{ filenamesRemoved: string[]; cloudinaryAssetsRemoved: Array<{ publicId: string; resourceType: string }> }> {
     const row = db.select().from(pairs).where(eq(pairs.id, id)).get();
-    if (!row) return { filenamesRemoved: [], cloudinaryIdsRemoved: [] };
+    if (!row) return { filenamesRemoved: [], cloudinaryAssetsRemoved: [] };
     const filenamesRemoved: string[] = [];
-    const cloudinaryIdsRemoved: string[] = [];
+    const cloudinaryAssetsRemoved: Array<{ publicId: string; resourceType: string }> = [];
     if (removePhotos) {
       const photoRows = db
         .select()
@@ -350,7 +369,12 @@ export class DatabaseStorage implements IStorage {
         .all();
       for (const p of photoRows) {
         filenamesRemoved.push(p.filename);
-        if (p.cloudinaryPublicId) cloudinaryIdsRemoved.push(p.cloudinaryPublicId);
+        if (p.cloudinaryPublicId) {
+          cloudinaryAssetsRemoved.push({
+            publicId: p.cloudinaryPublicId,
+            resourceType: p.resourceType ?? "image",
+          });
+        }
       }
       db.delete(photos).where(inArray(photos.id, [row.leftPhotoId, row.rightPhotoId])).run();
     } else {

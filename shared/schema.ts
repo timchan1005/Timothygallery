@@ -21,6 +21,8 @@ export const photos = sqliteTable("photos", {
   folderId: integer("folder_id"), // null = root
   pairId: integer("pair_id"), // null = not in a pair
   cloudinaryPublicId: text("cloudinary_public_id"), // null = legacy disk-only photo
+  resourceType: text("resource_type").notNull().default("image"), // 'image' | 'video'
+  duration: integer("duration"), // seconds, videos only
 });
 
 export const pairs = sqliteTable("pairs", {

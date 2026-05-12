@@ -25,6 +25,51 @@ export interface CloudinaryUploadResult {
   height: number | null;
   format: string | null;
   bytes: number;
+  resourceType?: string;
+  duration?: number | null;
+}
+
+export type CldResourceType = "image" | "video";
+
+/**
+ * Build a signed upload payload for browser → Cloudinary direct uploads.
+ * Returns everything the browser needs to POST a file to Cloudinary.
+ * Each signature is single-use and expires after ~1 hour.
+ */
+export function signUpload(opts: {
+  resourceType: CldResourceType;
+  folder?: string;
+  publicIdPrefix?: string;
+}): {
+  apiKey: string;
+  cloudName: string;
+  timestamp: number;
+  signature: string;
+  folder: string;
+  resourceType: CldResourceType;
+  uploadUrl: string;
+} {
+  if (!cloudinaryConfigured) {
+    throw new Error("Cloudinary is not configured on this server");
+  }
+  const folder = opts.folder ?? "lumen-gallery";
+  const timestamp = Math.floor(Date.now() / 1000);
+  // Parameters that will be signed AND sent in the multipart upload
+  // (these two sets must match exactly for Cloudinary to accept the signature).
+  const paramsToSign: Record<string, string | number> = {
+    folder,
+    timestamp,
+  };
+  const signature = cloudinary.utils.api_sign_request(paramsToSign, apiSecret!);
+  return {
+    apiKey: apiKey!,
+    cloudName: cloudName!,
+    timestamp,
+    signature,
+    folder,
+    resourceType: opts.resourceType,
+    uploadUrl: `https://api.cloudinary.com/v1_1/${cloudName}/${opts.resourceType}/upload`,
+  };
 }
 
 /**
@@ -33,7 +78,7 @@ export interface CloudinaryUploadResult {
  */
 export function uploadBufferToCloudinary(
   buffer: Buffer,
-  opts: { folder?: string; filename?: string } = {}
+  opts: { folder?: string; filename?: string; resourceType?: CldResourceType } = {}
 ): Promise<CloudinaryUploadResult> {
   return new Promise((resolve, reject) => {
     if (!cloudinaryConfigured) {
@@ -43,7 +88,7 @@ export function uploadBufferToCloudinary(
     const stream = cloudinary.uploader.upload_stream(
       {
         folder: opts.folder ?? "lumen-gallery",
-        resource_type: "image",
+        resource_type: opts.resourceType ?? "image",
         use_filename: Boolean(opts.filename),
         unique_filename: true,
         filename_override: opts.filename,
@@ -57,6 +102,8 @@ export function uploadBufferToCloudinary(
           height: result.height ?? null,
           format: result.format ?? null,
           bytes: result.bytes ?? buffer.byteLength,
+          resourceType: result.resource_type,
+          duration: (result as any).duration ?? null,
         });
       }
     );
@@ -90,10 +137,13 @@ export async function uploadFilePathToCloudinary(
   };
 }
 
-export async function deleteCloudinaryAsset(publicId: string): Promise<void> {
+export async function deleteCloudinaryAsset(
+  publicId: string,
+  resourceType: CldResourceType = "image"
+): Promise<void> {
   if (!cloudinaryConfigured) return;
   try {
-    await cloudinary.uploader.destroy(publicId, { resource_type: "image", invalidate: true });
+    await cloudinary.uploader.destroy(publicId, { resource_type: resourceType, invalidate: true });
   } catch (err) {
     console.warn("[cloudinary] failed to delete", publicId, err);
   }
@@ -108,7 +158,8 @@ export async function deleteCloudinaryAsset(publicId: string): Promise<void> {
  */
 export function cloudinaryDeliveryUrl(
   publicId: string,
-  transformation?: string
+  transformation?: string,
+  resourceType: CldResourceType = "image"
 ): string {
   if (!cloudinaryConfigured) return "";
   return cloudinary.url(publicId, {
@@ -117,6 +168,26 @@ export function cloudinaryDeliveryUrl(
       ? [{ raw_transformation: transformation }]
       : undefined,
     sign_url: false,
-    resource_type: "image",
+    resource_type: resourceType,
+  });
+}
+
+/**
+ * Build a poster (thumbnail) image URL for a video asset.
+ * Cloudinary derives a JPEG poster at the given transformation from the video.
+ */
+export function cloudinaryVideoPosterUrl(
+  publicId: string,
+  transformation?: string
+): string {
+  if (!cloudinaryConfigured) return "";
+  return cloudinary.url(publicId, {
+    secure: true,
+    resource_type: "video",
+    format: "jpg",
+    transformation: transformation
+      ? [{ raw_transformation: transformation }]
+      : undefined,
+    sign_url: false,
   });
 }

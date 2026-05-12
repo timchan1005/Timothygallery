@@ -13,6 +13,9 @@ import {
   uploadFilePathToCloudinary,
   deleteCloudinaryAsset,
   cloudinaryDeliveryUrl,
+  cloudinaryVideoPosterUrl,
+  signUpload,
+  type CldResourceType,
 } from "./cloudinary";
 
 const UPLOAD_DIR = path.resolve(process.cwd(), "uploads");
@@ -33,27 +36,52 @@ const diskStorageEngine = multer.diskStorage({
 const imageFileFilter: multer.Options["fileFilter"] = (_req, file, cb) => {
   const mime = file.mimetype || "";
   const name = file.originalname || "";
-  const extOk = /\.(jpe?g|png|gif|webp|heic|heif|avif|bmp|tiff?|svg)$/i.test(name);
-  if (mime.startsWith("image/") || (extOk && (mime === "" || mime === "application/octet-stream"))) {
+  const imageExtOk = /\.(jpe?g|png|gif|webp|heic|heif|avif|bmp|tiff?|svg)$/i.test(name);
+  const videoExtOk = /\.(mp4|mov|webm|m4v|mkv|avi)$/i.test(name);
+  if (
+    mime.startsWith("image/") ||
+    mime.startsWith("video/") ||
+    ((imageExtOk || videoExtOk) && (mime === "" || mime === "application/octet-stream"))
+  ) {
     cb(null, true);
   } else {
-    cb(new Error("Only image files are allowed"));
+    cb(new Error("Only image or video files are allowed"));
   }
 };
 
+function detectResourceType(file: { mimetype?: string; originalname?: string }): CldResourceType {
+  const mime = file.mimetype || "";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("image/")) return "image";
+  const name = file.originalname || "";
+  if (/\.(mp4|mov|webm|m4v|mkv|avi)$/i.test(name)) return "video";
+  return "image";
+}
+
 const upload = multer({
   storage: cloudinaryConfigured ? multer.memoryStorage() : diskStorageEngine,
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB per file
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB per file (fallback path only)
   fileFilter: imageFileFilter,
 });
 
 // Cloudinary URL transformations
 const THUMB_TX = "w_600,h_600,c_fill,g_auto,f_auto,q_auto";
 const FULL_TX = "f_auto,q_auto";
+// Video poster (used for grid thumbnail): pick a representative frame
+const VIDEO_POSTER_TX = "w_600,h_600,c_fill,g_auto,so_auto,q_auto";
+// Streaming video URL (auto codec)
+const VIDEO_FULL_TX = "q_auto";
 
 // Add Cloudinary delivery URLs to a photo record before sending to the client.
 function withUrls<T extends Photo>(photo: T): T & { url?: string; thumbnailUrl?: string } {
   if (photo.cloudinaryPublicId) {
+    if (photo.resourceType === "video") {
+      return {
+        ...photo,
+        url: cloudinaryDeliveryUrl(photo.cloudinaryPublicId, VIDEO_FULL_TX, "video"),
+        thumbnailUrl: cloudinaryVideoPosterUrl(photo.cloudinaryPublicId, VIDEO_POSTER_TX),
+      };
+    }
     return {
       ...photo,
       url: cloudinaryDeliveryUrl(photo.cloudinaryPublicId, FULL_TX),
@@ -259,9 +287,14 @@ export async function registerRoutes(
     if (Number.isNaN(id)) return res.status(400).json({ message: "Bad id" });
     const existing = await storage.getFolder(id);
     if (!existing) return res.status(404).json({ message: "Not found" });
-    const { photoFilenames, cloudinaryIds } = await storage.deleteFolderRecursive(id);
+    const { photoFilenames, cloudinaryAssets } = await storage.deleteFolderRecursive(id);
     for (const fn of photoFilenames) unlinkSafe(fn);
-    for (const cid of cloudinaryIds) await deleteCloudinaryAsset(cid);
+    for (const asset of cloudinaryAssets) {
+      await deleteCloudinaryAsset(
+        asset.publicId,
+        asset.resourceType === "video" ? "video" : "image"
+      );
+    }
     res.status(204).end();
   });
 
@@ -295,18 +328,23 @@ export async function registerRoutes(
         }
         const created = [];
         for (const f of files) {
+          const resourceType = detectResourceType(f);
           let cloudinaryPublicId: string | null = null;
           let storedFilename = f.filename || "";
           let width: number | null = null;
           let height: number | null = null;
+          let duration: number | null = null;
           let size = f.size;
           if (cloudinaryConfigured && f.buffer) {
-            const result = await uploadBufferToCloudinary(f.buffer, { filename: f.originalname });
+            const result = await uploadBufferToCloudinary(f.buffer, {
+              filename: f.originalname,
+              resourceType,
+            });
             cloudinaryPublicId = result.publicId;
             width = result.width;
             height = result.height;
             size = result.bytes;
-            // Keep a stable, unique filename for legacy paths (download endpoint, etc.)
+            duration = result.duration ?? null;
             storedFilename = `cloudinary:${result.publicId}`;
           }
           const photo = await storage.createPhoto({
@@ -319,6 +357,8 @@ export async function registerRoutes(
             uploadedAt: Date.now(),
             folderId,
             cloudinaryPublicId,
+            resourceType,
+            duration,
           });
           created.push(photo);
         }
@@ -362,6 +402,12 @@ export async function registerRoutes(
     const photo = await storage.getPhoto(id);
     if (!photo) return res.status(404).json({ message: "Not found" });
     if (photo.cloudinaryPublicId) {
+      if (photo.resourceType === "video") {
+        return res.redirect(
+          302,
+          cloudinaryDeliveryUrl(photo.cloudinaryPublicId, VIDEO_FULL_TX, "video")
+        );
+      }
       return res.redirect(302, cloudinaryDeliveryUrl(photo.cloudinaryPublicId, FULL_TX));
     }
     const fullPath = path.join(UPLOAD_DIR, photo.filename);
@@ -383,7 +429,8 @@ export async function registerRoutes(
       // fl_attachment forces the browser to download instead of inline-display
       const url = cloudinaryDeliveryUrl(
         photo.cloudinaryPublicId,
-        `fl_attachment:${encodeURIComponent(photo.originalName.replace(/\.[^.]+$/, ""))}`
+        `fl_attachment:${encodeURIComponent(photo.originalName.replace(/\.[^.]+$/, ""))}`,
+        photo.resourceType === "video" ? "video" : "image"
       );
       return res.redirect(302, url);
     }
@@ -404,10 +451,80 @@ export async function registerRoutes(
     if (removed) {
       unlinkSafe(removed.filename);
       if (removed.cloudinaryPublicId) {
-        await deleteCloudinaryAsset(removed.cloudinaryPublicId);
+        await deleteCloudinaryAsset(
+          removed.cloudinaryPublicId,
+          removed.resourceType === "video" ? "video" : "image"
+        );
       }
     }
     res.status(204).end();
+  });
+
+  // ---------- DIRECT-TO-CLOUDINARY UPLOADS ----------
+
+  // Returns a short-lived signature so the browser can POST directly to Cloudinary.
+  // Body: { resourceType: "image" | "video" }
+  const signSchema = z.object({
+    resourceType: z.enum(["image", "video"]),
+  });
+
+  app.post("/api/cloudinary/sign", (req, res) => {
+    if (!cloudinaryConfigured) {
+      return res.status(503).json({ message: "Cloudinary is not configured on the server" });
+    }
+    try {
+      const body = signSchema.parse(req.body);
+      const payload = signUpload({ resourceType: body.resourceType });
+      res.json(payload);
+    } catch (err: any) {
+      const msg = err?.errors?.[0]?.message || err?.message || "Bad request";
+      res.status(400).json({ message: msg });
+    }
+  });
+
+  // Register a photo/video after a successful direct upload to Cloudinary.
+  // The client uploads the bytes itself, then calls this endpoint to persist metadata.
+  const registerSchema = z.object({
+    cloudinaryPublicId: z.string().min(1),
+    resourceType: z.enum(["image", "video"]),
+    originalName: z.string().min(1).max(300),
+    mimeType: z.string().min(1).max(120),
+    size: z.number().int().nonnegative(),
+    width: z.number().int().positive().optional().nullable(),
+    height: z.number().int().positive().optional().nullable(),
+    duration: z.number().nonnegative().optional().nullable(),
+    folderId: z.union([z.number().int().positive(), z.null()]).optional(),
+  });
+
+  app.post("/api/photos/register", async (req, res) => {
+    try {
+      const body = registerSchema.parse(req.body);
+      const folderId = body.folderId ?? null;
+      if (folderId !== null) {
+        const exists = await storage.getFolder(folderId);
+        if (!exists) return res.status(400).json({ message: "Target folder not found" });
+      }
+      const photo = await storage.createPhoto({
+        filename: `cloudinary:${body.cloudinaryPublicId}`,
+        originalName: body.originalName,
+        mimeType: body.mimeType,
+        size: body.size,
+        width: body.width ?? null,
+        height: body.height ?? null,
+        uploadedAt: Date.now(),
+        folderId,
+        cloudinaryPublicId: body.cloudinaryPublicId,
+        resourceType: body.resourceType,
+        duration:
+          body.duration !== undefined && body.duration !== null
+            ? Math.round(body.duration)
+            : null,
+      });
+      res.status(201).json(withUrls(photo));
+    } catch (err: any) {
+      const msg = err?.errors?.[0]?.message || err?.message || "Bad request";
+      res.status(400).json({ message: msg });
+    }
   });
 
   // ---------- PAIRS ----------
@@ -490,17 +607,23 @@ export async function registerRoutes(
         // Create both photos
         const created = [];
         for (const f of files) {
+          const resourceType = detectResourceType(f);
           let cloudinaryPublicId: string | null = null;
           let storedFilename = f.filename || "";
           let width: number | null = null;
           let height: number | null = null;
+          let duration: number | null = null;
           let size = f.size;
           if (cloudinaryConfigured && f.buffer) {
-            const result = await uploadBufferToCloudinary(f.buffer, { filename: f.originalname });
+            const result = await uploadBufferToCloudinary(f.buffer, {
+              filename: f.originalname,
+              resourceType,
+            });
             cloudinaryPublicId = result.publicId;
             width = result.width;
             height = result.height;
             size = result.bytes;
+            duration = result.duration ?? null;
             storedFilename = `cloudinary:${result.publicId}`;
           }
           const photo = await storage.createPhoto({
@@ -513,6 +636,8 @@ export async function registerRoutes(
             uploadedAt: Date.now(),
             folderId,
             cloudinaryPublicId,
+            resourceType,
+            duration,
           });
           created.push(photo);
         }
@@ -575,9 +700,14 @@ export async function registerRoutes(
     const pair = await storage.getPair(id);
     if (!pair) return res.status(404).json({ message: "Not found" });
     const keepPhotos = req.query.keepPhotos === "1" || req.query.keepPhotos === "true";
-    const { filenamesRemoved, cloudinaryIdsRemoved } = await storage.deletePair(id, !keepPhotos);
+    const { filenamesRemoved, cloudinaryAssetsRemoved } = await storage.deletePair(id, !keepPhotos);
     for (const fn of filenamesRemoved) unlinkSafe(fn);
-    for (const id of cloudinaryIdsRemoved) await deleteCloudinaryAsset(id);
+    for (const asset of cloudinaryAssetsRemoved) {
+      await deleteCloudinaryAsset(
+        asset.publicId,
+        asset.resourceType === "video" ? "video" : "image"
+      );
+    }
     res.status(204).end();
   });
 

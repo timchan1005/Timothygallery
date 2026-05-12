@@ -1,7 +1,56 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { photoUrl, photoThumbUrl } from "@/lib/queryClient";
 import type { PairWithPhotos } from "@shared/schema";
-import { Columns2, ArrowLeftRight, X, Trash2, Pencil, ChevronLeft, ChevronRight, FolderInput } from "lucide-react";
+import { Columns2, ArrowLeftRight, X, Trash2, Pencil, ChevronLeft, ChevronRight, FolderInput, Play } from "lucide-react";
+
+function VideoPlayBadge({ size = "md" }: { size?: "sm" | "md" }) {
+  const cls =
+    size === "sm"
+      ? "h-7 w-7"
+      : "h-10 w-10";
+  const ic = size === "sm" ? "h-3 w-3" : "h-4 w-4";
+  return (
+    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+      <div className={`${cls} rounded-full bg-black/55 text-white flex items-center justify-center shadow backdrop-blur-sm`}>
+        <Play className={`${ic} fill-current ml-0.5`} />
+      </div>
+    </div>
+  );
+}
+
+function PairMedia({
+  photo,
+  className,
+  testId,
+  controls = false,
+}: {
+  photo: PairWithPhotos["leftPhoto"];
+  className?: string;
+  testId?: string;
+  controls?: boolean;
+}) {
+  if (photo.resourceType === "video") {
+    return (
+      <video
+        src={photoUrl(photo)}
+        poster={photoThumbUrl(photo)}
+        controls={controls}
+        playsInline
+        className={className}
+        data-testid={testId}
+      />
+    );
+  }
+  return (
+    <img
+      src={photoUrl(photo)}
+      alt={photo.originalName}
+      className={className}
+      draggable={false}
+      data-testid={testId}
+    />
+  );
+}
 
 // -------- Pair card in the grid (side-by-side preview) --------
 
@@ -40,6 +89,7 @@ export function PairCard({
             loading="lazy"
             draggable={false}
           />
+          {pair.rightPhoto.resourceType === "video" && <VideoPlayBadge size="sm" />}
         </div>
 
         {/* Front card (left photo) — sits on top */}
@@ -51,6 +101,7 @@ export function PairCard({
             loading="lazy"
             draggable={false}
           />
+          {pair.leftPhoto.resourceType === "video" && <VideoPlayBadge size="md" />}
 
           {/* Pair badge */}
           <div className="pointer-events-none absolute top-2 left-2 inline-flex items-center gap-1 rounded-full bg-black/55 backdrop-blur-sm px-2 py-1 text-[11px] font-medium text-white">
@@ -295,19 +346,19 @@ function SideBySideView({ pair }: { pair: PairWithPhotos }) {
       data-testid="pair-view-side"
     >
       <div className="flex-1 min-h-0 relative flex items-center justify-center">
-        <img
-          src={photoUrl(pair.leftPhoto)}
-          alt={pair.leftPhoto.originalName}
+        <PairMedia
+          photo={pair.leftPhoto}
+          controls
           className="max-w-full max-h-full object-contain select-none"
-          data-testid="img-pair-left"
+          testId="img-pair-left"
         />
       </div>
       <div className="flex-1 min-h-0 relative flex items-center justify-center">
-        <img
-          src={photoUrl(pair.rightPhoto)}
-          alt={pair.rightPhoto.originalName}
+        <PairMedia
+          photo={pair.rightPhoto}
+          controls
           className="max-w-full max-h-full object-contain select-none"
-          data-testid="img-pair-right"
+          testId="img-pair-right"
         />
       </div>
     </div>
@@ -362,22 +413,18 @@ function SliderView({ pair }: { pair: PairWithPhotos }) {
       data-testid="pair-view-slider"
     >
       {/* Right photo as the base layer */}
-      <img
-        src={photoUrl(pair.rightPhoto)}
-        alt={pair.rightPhoto.originalName}
+      <PairMedia
+        photo={pair.rightPhoto}
         className="absolute inset-0 w-full h-full object-contain bg-black pointer-events-none"
-        draggable={false}
       />
       {/* Left photo clipped to pct */}
       <div
         className="absolute inset-0 overflow-hidden pointer-events-none"
         style={{ clipPath: `inset(0 ${100 - pct}% 0 0)` }}
       >
-        <img
-          src={photoUrl(pair.leftPhoto)}
-          alt={pair.leftPhoto.originalName}
+        <PairMedia
+          photo={pair.leftPhoto}
           className="absolute inset-0 w-full h-full object-contain bg-black"
-          draggable={false}
         />
       </div>
       {/* Divider + handle */}

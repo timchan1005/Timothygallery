@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiRequest, queryClient, API_BASE, withToken, setAuthToken, getAuthToken, subscribeAuthToken, photoUrl, photoThumbUrl, photoDownloadUrl } from "@/lib/queryClient";
+import { uploadFilesDirect } from "@/lib/cloudinaryUpload";
 import type { Folder, Photo, PairWithPhotos } from "@shared/schema";
 import { PairCard, PairLightbox } from "@/components/pair-views";
 import { Button } from "@/components/ui/button";
@@ -33,6 +34,7 @@ import {
   LayoutGrid,
   Grid3x3,
   List as ListIcon,
+  Play,
 } from "lucide-react";
 import {
   AlertDialog,
@@ -63,12 +65,24 @@ import {
 // ---------- helpers ----------
 
 const IMAGE_EXT = /\.(jpe?g|png|gif|webp|heic|heif|avif|bmp|tiff?|svg)$/i;
+const VIDEO_EXT = /\.(mp4|mov|webm|m4v|mkv|avi)$/i;
 function isLikelyImage(f: File): boolean {
-  // Accept anything with image/* mime, or empty/octet-stream mime + image extension.
-  // iOS Safari sometimes hands back empty mime for HEIC photos.
   if (f.type && f.type.startsWith("image/")) return true;
   if (!f.type || f.type === "application/octet-stream") return IMAGE_EXT.test(f.name);
   return false;
+}
+function isLikelyMedia(f: File): boolean {
+  if (f.type && (f.type.startsWith("image/") || f.type.startsWith("video/"))) return true;
+  if (!f.type || f.type === "application/octet-stream") {
+    return IMAGE_EXT.test(f.name) || VIDEO_EXT.test(f.name);
+  }
+  return false;
+}
+function formatDuration(sec?: number | null): string | null {
+  if (sec == null || !Number.isFinite(sec) || sec <= 0) return null;
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 function formatBytes(bytes: number): string {
@@ -245,24 +259,28 @@ export default function Gallery() {
 
   // ---------- mutations ----------
 
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+
   const uploadMutation = useMutation({
     mutationFn: async (files: FileList | File[]) => {
-      const arr = Array.from(files);
-      const imgs = arr.filter(isLikelyImage);
-      if (imgs.length === 0) throw new Error("No image files selected");
-      const fd = new FormData();
-      for (const f of imgs) fd.append("files", f);
-      if (currentFolderId !== null) fd.append("folderId", String(currentFolderId));
-      const res = await apiRequest("POST", "/api/photos", fd);
-      return res.json();
+      const arr = Array.from(files).filter(isLikelyMedia);
+      if (arr.length === 0) throw new Error("No image or video files selected");
+      setUploadProgress(0);
+      const created = await uploadFilesDirect(arr, {
+        folderId: currentFolderId,
+        onProgress: (frac) => setUploadProgress(frac),
+      });
+      return created;
     },
-    onSuccess: (created: Photo[]) => {
+    onSuccess: (created) => {
+      setUploadProgress(null);
       queryClient.invalidateQueries({ queryKey: ["/api/photos"] });
       toast({
-        title: `Uploaded ${created.length} ${created.length === 1 ? "photo" : "photos"}`,
+        title: `Uploaded ${created.length} ${created.length === 1 ? "item" : "items"}`,
       });
     },
     onError: (err: Error) => {
+      setUploadProgress(null);
       toast({ title: "Upload failed", description: err.message, variant: "destructive" });
     },
   });
@@ -384,21 +402,28 @@ export default function Gallery() {
   // ---- Pair mutations ----
   const uploadPairMutation = useMutation({
     mutationFn: async (files: FileList | File[]) => {
-      const arr = Array.from(files).filter(isLikelyImage);
-      if (arr.length !== 2) throw new Error("Please select exactly two image files");
-      const fd = new FormData();
-      fd.append("files", arr[0]);
-      fd.append("files", arr[1]);
-      if (currentFolderId !== null) fd.append("folderId", String(currentFolderId));
-      const res = await apiRequest("POST", "/api/pairs/upload", fd);
+      const arr = Array.from(files).filter(isLikelyMedia);
+      if (arr.length !== 2) throw new Error("Please select exactly two files");
+      setUploadProgress(0);
+      // Upload both directly to Cloudinary, then bind them into a pair.
+      const created = await uploadFilesDirect(arr, {
+        folderId: currentFolderId,
+        onProgress: (frac) => setUploadProgress(frac),
+      });
+      const res = await apiRequest("POST", "/api/pairs", {
+        leftPhotoId: created[0].id,
+        rightPhotoId: created[1].id,
+      });
       return res.json();
     },
     onSuccess: () => {
+      setUploadProgress(null);
       queryClient.invalidateQueries({ queryKey: ["/api/pairs"] });
       queryClient.invalidateQueries({ queryKey: ["/api/photos"] });
       toast({ title: "Pair uploaded" });
     },
     onError: (err: Error) => {
+      setUploadProgress(null);
       toast({ title: "Pair upload failed", description: err.message, variant: "destructive" });
     },
   });
@@ -662,6 +687,15 @@ export default function Gallery() {
           </div>
         </div>
 
+        {uploadProgress !== null && (
+          <div className="h-1 w-full bg-muted overflow-hidden" data-testid="upload-progress">
+            <div
+              className="h-full bg-primary transition-all duration-150"
+              style={{ width: `${Math.round(uploadProgress * 100)}%` }}
+            />
+          </div>
+        )}
+
         {/* Mobile search row */}
         <div className="sm:hidden px-4 pb-3">
           <div className="relative">
@@ -682,7 +716,7 @@ export default function Gallery() {
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
+        accept="image/*,video/*"
         multiple
         className="sr-only"
         tabIndex={-1}
@@ -700,7 +734,7 @@ export default function Gallery() {
       <input
         ref={pairFileInputRef}
         type="file"
-        accept="image/*"
+        accept="image/*,video/*"
         multiple
         className="sr-only"
         tabIndex={-1}
@@ -1006,6 +1040,13 @@ export default function Gallery() {
                               loading="lazy"
                               className="absolute inset-0 w-full h-full object-cover"
                             />
+                            {photo.resourceType === "video" && (
+                              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/15">
+                                <div className="h-5 w-5 rounded-full bg-black/65 text-white flex items-center justify-center">
+                                  <Play className="h-2.5 w-2.5 fill-current" />
+                                </div>
+                              </div>
+                            )}
                           </div>
                           <div className="min-w-0 flex-1">
                             <p
@@ -1096,6 +1137,20 @@ export default function Gallery() {
                             loading="lazy"
                             className="w-full h-full object-cover"
                           />
+                          {photo.resourceType === "video" && (
+                            <>
+                              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                                <div className="h-12 w-12 rounded-full bg-black/55 text-white flex items-center justify-center shadow-lg backdrop-blur-sm">
+                                  <Play className="h-5 w-5 fill-current ml-0.5" />
+                                </div>
+                              </div>
+                              {formatDuration(photo.duration) && (
+                                <div className="pointer-events-none absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/70 text-white text-[10px] font-medium tabular-nums">
+                                  {formatDuration(photo.duration)}
+                                </div>
+                              )}
+                            </>
+                          )}
                           {viewMode !== "compact" && (
                             <div className="pointer-events-none absolute inset-x-0 bottom-0 p-2 bg-gradient-to-t from-black/55 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
                               <p
@@ -1285,13 +1340,26 @@ export default function Gallery() {
           </div>
 
           <div className="flex-1 relative flex items-center justify-center px-2 sm:px-4 pb-4">
-            <img
-              key={selectedPhoto.id}
-              src={photoUrl(selectedPhoto)}
-              alt={selectedPhoto.originalName}
-              className="max-w-full max-h-full object-contain select-none"
-              data-testid="img-lightbox"
-            />
+            {selectedPhoto.resourceType === "video" ? (
+              <video
+                key={selectedPhoto.id}
+                src={photoUrl(selectedPhoto)}
+                poster={photoThumbUrl(selectedPhoto)}
+                controls
+                autoPlay
+                playsInline
+                className="max-w-full max-h-full select-none"
+                data-testid="video-lightbox"
+              />
+            ) : (
+              <img
+                key={selectedPhoto.id}
+                src={photoUrl(selectedPhoto)}
+                alt={selectedPhoto.originalName}
+                className="max-w-full max-h-full object-contain select-none"
+                data-testid="img-lightbox"
+              />
+            )}
 
             {selectedIdx !== null && selectedIdx > 0 && (
               <button
