@@ -4,6 +4,7 @@ import type { Request } from 'express';
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "node:http";
+import { backfillCloudinary } from "./backfill";
 
 const app = express();
 const httpServer = createServer(app);
@@ -100,6 +101,10 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+      // Non-blocking: migrate any remaining disk photos to Cloudinary.
+      backfillCloudinary().catch((err) => {
+        console.warn("[backfill] unexpected error:", err);
+      });
     },
   );
 })();

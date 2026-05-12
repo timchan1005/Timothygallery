@@ -6,13 +6,22 @@ import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { z } from "zod";
+import type { Photo } from "@shared/schema";
+import {
+  cloudinaryConfigured,
+  uploadBufferToCloudinary,
+  uploadFilePathToCloudinary,
+  deleteCloudinaryAsset,
+  cloudinaryDeliveryUrl,
+} from "./cloudinary";
 
 const UPLOAD_DIR = path.resolve(process.cwd(), "uploads");
 if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
-const storageEngine = multer.diskStorage({
+// Cloudinary uploads go through memory storage; disk fallback writes to UPLOAD_DIR.
+const diskStorageEngine = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
   filename: (_req, file, cb) => {
     const ext = path.extname(file.originalname) || "";
@@ -21,20 +30,50 @@ const storageEngine = multer.diskStorage({
   },
 });
 
+const imageFileFilter: multer.Options["fileFilter"] = (_req, file, cb) => {
+  const mime = file.mimetype || "";
+  const name = file.originalname || "";
+  const extOk = /\.(jpe?g|png|gif|webp|heic|heif|avif|bmp|tiff?|svg)$/i.test(name);
+  if (mime.startsWith("image/") || (extOk && (mime === "" || mime === "application/octet-stream"))) {
+    cb(null, true);
+  } else {
+    cb(new Error("Only image files are allowed"));
+  }
+};
+
 const upload = multer({
-  storage: storageEngine,
+  storage: cloudinaryConfigured ? multer.memoryStorage() : diskStorageEngine,
   limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB per file
-  fileFilter: (_req, file, cb) => {
-    const mime = file.mimetype || "";
-    const name = file.originalname || "";
-    const extOk = /\.(jpe?g|png|gif|webp|heic|heif|avif|bmp|tiff?|svg)$/i.test(name);
-    if (mime.startsWith("image/") || (extOk && (mime === "" || mime === "application/octet-stream"))) {
-      cb(null, true);
-    } else {
-      cb(new Error("Only image files are allowed"));
-    }
-  },
+  fileFilter: imageFileFilter,
 });
+
+// Cloudinary URL transformations
+const THUMB_TX = "w_600,h_600,c_fill,g_auto,f_auto,q_auto";
+const FULL_TX = "f_auto,q_auto";
+
+// Add Cloudinary delivery URLs to a photo record before sending to the client.
+function withUrls<T extends Photo>(photo: T): T & { url?: string; thumbnailUrl?: string } {
+  if (photo.cloudinaryPublicId) {
+    return {
+      ...photo,
+      url: cloudinaryDeliveryUrl(photo.cloudinaryPublicId, FULL_TX),
+      thumbnailUrl: cloudinaryDeliveryUrl(photo.cloudinaryPublicId, THUMB_TX),
+    };
+  }
+  return photo;
+}
+
+function withUrlsMany<T extends Photo>(photos: T[]): Array<T & { url?: string; thumbnailUrl?: string }> {
+  return photos.map(withUrls);
+}
+
+function withPairUrls<T extends { leftPhoto: Photo; rightPhoto: Photo }>(pair: T): T {
+  return {
+    ...pair,
+    leftPhoto: withUrls(pair.leftPhoto),
+    rightPhoto: withUrls(pair.rightPhoto),
+  };
+}
 
 // Helpers
 function parseFolderId(val: unknown): number | null {
@@ -220,8 +259,9 @@ export async function registerRoutes(
     if (Number.isNaN(id)) return res.status(400).json({ message: "Bad id" });
     const existing = await storage.getFolder(id);
     if (!existing) return res.status(404).json({ message: "Not found" });
-    const { photoFilenames } = await storage.deleteFolderRecursive(id);
+    const { photoFilenames, cloudinaryIds } = await storage.deleteFolderRecursive(id);
     for (const fn of photoFilenames) unlinkSafe(fn);
+    for (const cid of cloudinaryIds) await deleteCloudinaryAsset(cid);
     res.status(204).end();
   });
 
@@ -233,7 +273,7 @@ export async function registerRoutes(
     const folderId = parseFolderId(req.query.folderId);
     const includePaired = req.query.includePaired === "1" || req.query.includePaired === "true";
     const all = await storage.listPhotos(folderId, { excludePaired: !includePaired });
-    res.json(all);
+    res.json(withUrlsMany(all));
   });
 
   // Upload one or more photos to a folder (root if not provided)
@@ -255,19 +295,34 @@ export async function registerRoutes(
         }
         const created = [];
         for (const f of files) {
+          let cloudinaryPublicId: string | null = null;
+          let storedFilename = f.filename || "";
+          let width: number | null = null;
+          let height: number | null = null;
+          let size = f.size;
+          if (cloudinaryConfigured && f.buffer) {
+            const result = await uploadBufferToCloudinary(f.buffer, { filename: f.originalname });
+            cloudinaryPublicId = result.publicId;
+            width = result.width;
+            height = result.height;
+            size = result.bytes;
+            // Keep a stable, unique filename for legacy paths (download endpoint, etc.)
+            storedFilename = `cloudinary:${result.publicId}`;
+          }
           const photo = await storage.createPhoto({
-            filename: f.filename,
+            filename: storedFilename,
             originalName: f.originalname,
             mimeType: f.mimetype,
-            size: f.size,
-            width: null,
-            height: null,
+            size,
+            width,
+            height,
             uploadedAt: Date.now(),
             folderId,
+            cloudinaryPublicId,
           });
           created.push(photo);
         }
-        res.status(201).json(created);
+        res.status(201).json(withUrlsMany(created));
       } catch (err: any) {
         res.status(500).json({ message: err?.message || "Upload failed" });
       }
@@ -291,19 +346,24 @@ export async function registerRoutes(
         if (!target) return res.status(400).json({ message: "Target folder not found" });
       }
       const updated = await storage.movePhoto(id, body.folderId);
-      res.json(updated);
+      res.json(updated ? withUrls(updated) : updated);
     } catch (err: any) {
       const msg = err?.errors?.[0]?.message || err?.message || "Bad request";
       res.status(400).json({ message: msg });
     }
   });
 
-  // Serve raw image bytes
+  // Serve raw image bytes (legacy/fallback endpoint).
+  // For Cloudinary-backed photos: redirect to the CDN URL.
+  // For legacy disk-only photos: stream the local file.
   app.get("/api/photos/:id/raw", async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (Number.isNaN(id)) return res.status(400).json({ message: "Bad id" });
     const photo = await storage.getPhoto(id);
     if (!photo) return res.status(404).json({ message: "Not found" });
+    if (photo.cloudinaryPublicId) {
+      return res.redirect(302, cloudinaryDeliveryUrl(photo.cloudinaryPublicId, FULL_TX));
+    }
     const fullPath = path.join(UPLOAD_DIR, photo.filename);
     if (!fs.existsSync(fullPath)) {
       return res.status(404).json({ message: "File missing on disk" });
@@ -319,6 +379,14 @@ export async function registerRoutes(
     if (Number.isNaN(id)) return res.status(400).json({ message: "Bad id" });
     const photo = await storage.getPhoto(id);
     if (!photo) return res.status(404).json({ message: "Not found" });
+    if (photo.cloudinaryPublicId) {
+      // fl_attachment forces the browser to download instead of inline-display
+      const url = cloudinaryDeliveryUrl(
+        photo.cloudinaryPublicId,
+        `fl_attachment:${encodeURIComponent(photo.originalName.replace(/\.[^.]+$/, ""))}`
+      );
+      return res.redirect(302, url);
+    }
     const fullPath = path.join(UPLOAD_DIR, photo.filename);
     if (!fs.existsSync(fullPath)) {
       return res.status(404).json({ message: "File missing on disk" });
@@ -332,8 +400,13 @@ export async function registerRoutes(
     if (Number.isNaN(id)) return res.status(400).json({ message: "Bad id" });
     const photo = await storage.getPhoto(id);
     if (!photo) return res.status(404).json({ message: "Not found" });
-    unlinkSafe(photo.filename);
-    await storage.deletePhoto(id);
+    const removed = await storage.deletePhoto(id);
+    if (removed) {
+      unlinkSafe(removed.filename);
+      if (removed.cloudinaryPublicId) {
+        await deleteCloudinaryAsset(removed.cloudinaryPublicId);
+      }
+    }
     res.status(204).end();
   });
 
@@ -343,7 +416,7 @@ export async function registerRoutes(
   app.get("/api/pairs", async (req, res) => {
     const folderId = parseFolderId(req.query.folderId);
     const items = await storage.listPairs(folderId);
-    res.json(items);
+    res.json(items.map(withPairUrls));
   });
 
   // Get a single pair
@@ -352,7 +425,7 @@ export async function registerRoutes(
     if (Number.isNaN(id)) return res.status(400).json({ message: "Bad id" });
     const pair = await storage.getPair(id);
     if (!pair) return res.status(404).json({ message: "Not found" });
-    res.json(pair);
+    res.json(withPairUrls(pair));
   });
 
   // Create a pair from EXISTING photos. Body: { leftPhotoId, rightPhotoId, folderId?, name? }
@@ -384,7 +457,7 @@ export async function registerRoutes(
         rightPhotoId: body.rightPhotoId,
         folderId: folderId ?? null,
       });
-      res.status(201).json(pair);
+      res.status(201).json(withPairUrls(pair));
     } catch (err: any) {
       const msg = err?.errors?.[0]?.message || err?.message || "Bad request";
       res.status(400).json({ message: msg });
@@ -417,15 +490,29 @@ export async function registerRoutes(
         // Create both photos
         const created = [];
         for (const f of files) {
+          let cloudinaryPublicId: string | null = null;
+          let storedFilename = f.filename || "";
+          let width: number | null = null;
+          let height: number | null = null;
+          let size = f.size;
+          if (cloudinaryConfigured && f.buffer) {
+            const result = await uploadBufferToCloudinary(f.buffer, { filename: f.originalname });
+            cloudinaryPublicId = result.publicId;
+            width = result.width;
+            height = result.height;
+            size = result.bytes;
+            storedFilename = `cloudinary:${result.publicId}`;
+          }
           const photo = await storage.createPhoto({
-            filename: f.filename,
+            filename: storedFilename,
             originalName: f.originalname,
             mimeType: f.mimetype,
-            size: f.size,
-            width: null,
-            height: null,
+            size,
+            width,
+            height,
             uploadedAt: Date.now(),
             folderId,
+            cloudinaryPublicId,
           });
           created.push(photo);
         }
@@ -435,7 +522,7 @@ export async function registerRoutes(
           rightPhotoId: created[1].id,
           folderId,
         });
-        res.status(201).json(pair);
+        res.status(201).json(withPairUrls(pair));
       } catch (err: any) {
         // best-effort cleanup
         for (const f of files) unlinkSafe(f.filename);
@@ -471,8 +558,9 @@ export async function registerRoutes(
     const pair = await storage.getPair(id);
     if (!pair) return res.status(404).json({ message: "Not found" });
     const keepPhotos = req.query.keepPhotos === "1" || req.query.keepPhotos === "true";
-    const { filenamesRemoved } = await storage.deletePair(id, !keepPhotos);
+    const { filenamesRemoved, cloudinaryIdsRemoved } = await storage.deletePair(id, !keepPhotos);
     for (const fn of filenamesRemoved) unlinkSafe(fn);
+    for (const id of cloudinaryIdsRemoved) await deleteCloudinaryAsset(id);
     res.status(204).end();
   });
 

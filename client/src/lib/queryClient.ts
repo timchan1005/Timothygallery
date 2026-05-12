@@ -25,6 +25,30 @@ export function withToken(url: string): string {
   return `${url}${sep}t=${encodeURIComponent(authToken)}`;
 }
 
+/** Photo records returned by the API. Cloudinary fields are present only for new uploads. */
+export interface PhotoLike {
+  id: number;
+  url?: string | null;
+  thumbnailUrl?: string | null;
+}
+
+/** Full-size image URL. Prefers Cloudinary; falls back to the token-gated raw endpoint. */
+export function photoUrl(photo: PhotoLike): string {
+  if (photo.url) return photo.url;
+  return withToken(`${API_BASE}/api/photos/${photo.id}/raw`);
+}
+
+/** Thumbnail-size image URL. Prefers Cloudinary thumbnail; falls back to the token-gated raw endpoint. */
+export function photoThumbUrl(photo: PhotoLike): string {
+  if (photo.thumbnailUrl) return photo.thumbnailUrl;
+  return withToken(`${API_BASE}/api/photos/${photo.id}/raw`);
+}
+
+/** Download URL (Cloudinary redirect handles the attachment header server-side). */
+export function photoDownloadUrl(photo: PhotoLike): string {
+  return withToken(`${API_BASE}/api/photos/${photo.id}/download`);
+}
+
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
     if (res.status === 401) {

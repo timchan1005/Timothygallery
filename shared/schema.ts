@@ -20,6 +20,7 @@ export const photos = sqliteTable("photos", {
   uploadedAt: integer("uploaded_at").notNull(),
   folderId: integer("folder_id"), // null = root
   pairId: integer("pair_id"), // null = not in a pair
+  cloudinaryPublicId: text("cloudinary_public_id"), // null = legacy disk-only photo
 });
 
 export const pairs = sqliteTable("pairs", {

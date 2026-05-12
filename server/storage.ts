@@ -49,6 +49,9 @@ try {
   if (!cols.some((c) => c.name === "pair_id")) {
     sqlite.exec(`ALTER TABLE photos ADD COLUMN pair_id INTEGER`);
   }
+  if (!cols.some((c) => c.name === "cloudinary_public_id")) {
+    sqlite.exec(`ALTER TABLE photos ADD COLUMN cloudinary_public_id TEXT`);
+  }
 } catch {
   // ignore
 }
@@ -62,20 +65,21 @@ export interface IStorage {
   createFolder(folder: InsertFolder): Promise<Folder>;
   renameFolder(id: number, name: string): Promise<Folder | undefined>;
   moveFolder(id: number, parentId: number | null): Promise<Folder | undefined>;
-  deleteFolderRecursive(id: number): Promise<{ folderIds: number[]; photoFilenames: string[] }>;
+  deleteFolderRecursive(id: number): Promise<{ folderIds: number[]; photoFilenames: string[]; cloudinaryIds: string[] }>;
   getFolderPath(id: number): Promise<Folder[]>; // breadcrumbs root -> folder
   // Photos
   listPhotos(folderId: number | null, opts?: { excludePaired?: boolean }): Promise<Photo[]>;
   getPhoto(id: number): Promise<Photo | undefined>;
   createPhoto(photo: InsertPhoto): Promise<Photo>;
   movePhoto(id: number, folderId: number | null): Promise<Photo | undefined>;
-  deletePhoto(id: number): Promise<{ filename: string } | undefined>;
+  setCloudinaryId(id: number, cloudinaryPublicId: string): Promise<Photo | undefined>;
+  deletePhoto(id: number): Promise<{ filename: string; cloudinaryPublicId: string | null } | undefined>;
   // Pairs
   listPairs(folderId: number | null): Promise<PairWithPhotos[]>;
   getPair(id: number): Promise<PairWithPhotos | undefined>;
   createPair(input: { name?: string | null; leftPhotoId: number; rightPhotoId: number; folderId: number | null }): Promise<PairWithPhotos>;
   renamePair(id: number, name: string | null): Promise<Pair | undefined>;
-  deletePair(id: number, removePhotos: boolean): Promise<{ filenamesRemoved: string[] }>;
+  deletePair(id: number, removePhotos: boolean): Promise<{ filenamesRemoved: string[]; cloudinaryIdsRemoved: string[] }>;
   // Helper to look up which folders contain pairs (for recursive deletes)
 }
 
@@ -132,7 +136,7 @@ export class DatabaseStorage implements IStorage {
 
   async deleteFolderRecursive(
     id: number
-  ): Promise<{ folderIds: number[]; photoFilenames: string[] }> {
+  ): Promise<{ folderIds: number[]; photoFilenames: string[]; cloudinaryIds: string[] }> {
     // Collect descendants
     const toVisit = [id];
     const folderIds: number[] = [];
@@ -146,15 +150,19 @@ export class DatabaseStorage implements IStorage {
         .all();
       for (const c of children) toVisit.push(c.id);
     }
-    // Collect photos to delete and capture their filenames
+    // Collect photos to delete and capture their filenames + Cloudinary IDs
     const photoFilenames: string[] = [];
+    const cloudinaryIds: string[] = [];
     for (const fId of folderIds) {
       const photoRows = db
-        .select({ filename: photos.filename })
+        .select({ filename: photos.filename, cloudinaryPublicId: photos.cloudinaryPublicId })
         .from(photos)
         .where(eq(photos.folderId, fId))
         .all();
-      for (const p of photoRows) photoFilenames.push(p.filename);
+      for (const p of photoRows) {
+        photoFilenames.push(p.filename);
+        if (p.cloudinaryPublicId) cloudinaryIds.push(p.cloudinaryPublicId);
+      }
       db.delete(photos).where(eq(photos.folderId, fId)).run();
       // also delete pairs that were anchored in this folder
       db.delete(pairs).where(eq(pairs.folderId, fId)).run();
@@ -163,7 +171,7 @@ export class DatabaseStorage implements IStorage {
     for (const fId of [...folderIds].reverse()) {
       db.delete(folders).where(eq(folders.id, fId)).run();
     }
-    return { folderIds, photoFilenames };
+    return { folderIds, photoFilenames, cloudinaryIds };
   }
 
   async getFolderPath(id: number): Promise<Folder[]> {
@@ -214,7 +222,16 @@ export class DatabaseStorage implements IStorage {
       .get();
   }
 
-  async deletePhoto(id: number): Promise<{ filename: string } | undefined> {
+  async setCloudinaryId(id: number, cloudinaryPublicId: string): Promise<Photo | undefined> {
+    return db
+      .update(photos)
+      .set({ cloudinaryPublicId })
+      .where(eq(photos.id, id))
+      .returning()
+      .get();
+  }
+
+  async deletePhoto(id: number): Promise<{ filename: string; cloudinaryPublicId: string | null } | undefined> {
     // If photo is part of a pair, dissolve the pair first (don't delete the partner)
     const ph = await this.getPhoto(id);
     if (!ph) return undefined;
@@ -224,7 +241,7 @@ export class DatabaseStorage implements IStorage {
       db.delete(pairs).where(eq(pairs.id, ph.pairId)).run();
     }
     db.delete(photos).where(eq(photos.id, id)).run();
-    return { filename: ph.filename };
+    return { filename: ph.filename, cloudinaryPublicId: ph.cloudinaryPublicId ?? null };
   }
 
   // ---------- Pairs ----------
@@ -307,17 +324,21 @@ export class DatabaseStorage implements IStorage {
     return db.update(pairs).set({ name }).where(eq(pairs.id, id)).returning().get();
   }
 
-  async deletePair(id: number, removePhotos: boolean): Promise<{ filenamesRemoved: string[] }> {
+  async deletePair(id: number, removePhotos: boolean): Promise<{ filenamesRemoved: string[]; cloudinaryIdsRemoved: string[] }> {
     const row = db.select().from(pairs).where(eq(pairs.id, id)).get();
-    if (!row) return { filenamesRemoved: [] };
+    if (!row) return { filenamesRemoved: [], cloudinaryIdsRemoved: [] };
     const filenamesRemoved: string[] = [];
+    const cloudinaryIdsRemoved: string[] = [];
     if (removePhotos) {
       const photoRows = db
         .select()
         .from(photos)
         .where(inArray(photos.id, [row.leftPhotoId, row.rightPhotoId]))
         .all();
-      for (const p of photoRows) filenamesRemoved.push(p.filename);
+      for (const p of photoRows) {
+        filenamesRemoved.push(p.filename);
+        if (p.cloudinaryPublicId) cloudinaryIdsRemoved.push(p.cloudinaryPublicId);
+      }
       db.delete(photos).where(inArray(photos.id, [row.leftPhotoId, row.rightPhotoId])).run();
     } else {
       // just unlink
@@ -327,7 +348,7 @@ export class DatabaseStorage implements IStorage {
         .run();
     }
     db.delete(pairs).where(eq(pairs.id, id)).run();
-    return { filenamesRemoved };
+    return { filenamesRemoved, cloudinaryIdsRemoved };
   }
 }
 

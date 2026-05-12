@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { apiRequest, queryClient, API_BASE, withToken, setAuthToken, getAuthToken, subscribeAuthToken } from "@/lib/queryClient";
+import { apiRequest, queryClient, API_BASE, withToken, setAuthToken, getAuthToken, subscribeAuthToken, photoUrl, photoThumbUrl, photoDownloadUrl } from "@/lib/queryClient";
 import type { Folder, Photo, PairWithPhotos } from "@shared/schema";
 import { PairCard, PairLightbox } from "@/components/pair-views";
 import { Button } from "@/components/ui/button";
@@ -924,7 +924,7 @@ export default function Gallery() {
                       aria-pressed={pairingMode ? isSelectedForPair : undefined}
                     >
                       <img
-                        src={withToken(`${API_BASE}/api/photos/${photo.id}/raw`)}
+                        src={photoThumbUrl(photo)}
                         alt={photo.originalName}
                         loading="lazy"
                         className="w-full h-full object-cover"
@@ -1066,7 +1066,7 @@ export default function Gallery() {
               <FolderInput className="h-4 w-4" />
             </button>
             <a
-              href={withToken(`${API_BASE}/api/photos/${selectedPhoto.id}/download`)}
+              href={photoDownloadUrl(selectedPhoto)}
               target="_self"
               rel="noopener"
               className="inline-flex items-center justify-center h-9 w-9 rounded-md text-white hover:bg-white/10 transition-colors"
@@ -1098,7 +1098,7 @@ export default function Gallery() {
           <div className="flex-1 relative flex items-center justify-center px-2 sm:px-4 pb-4">
             <img
               key={selectedPhoto.id}
-              src={withToken(`${API_BASE}/api/photos/${selectedPhoto.id}/raw`)}
+              src={photoUrl(selectedPhoto)}
               alt={selectedPhoto.originalName}
               className="max-w-full max-h-full object-contain select-none"
               data-testid="img-lightbox"
