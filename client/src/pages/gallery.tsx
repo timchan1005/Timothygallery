@@ -183,6 +183,7 @@ export default function Gallery() {
   const [moveTarget, setMoveTarget] = useState<
     | { type: "photo"; photo: Photo }
     | { type: "folder"; folder: Folder }
+    | { type: "pair"; pair: PairWithPhotos }
     | null
   >(null);
 
@@ -337,6 +338,23 @@ export default function Gallery() {
       queryClient.invalidateQueries({ queryKey: ["/api/folders/path"] });
       setMoveTarget(null);
       toast({ title: "Folder moved" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Move failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const movePairMutation = useMutation({
+    mutationFn: async ({ id, folderId }: { id: number; folderId: number | null }) => {
+      const res = await apiRequest("PATCH", `/api/pairs/${id}`, { folderId });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/pairs"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/photos"] });
+      setMoveTarget(null);
+      setSelectedPair(null);
+      toast({ title: "Pair moved" });
     },
     onError: (err: Error) => {
       toast({ title: "Move failed", description: err.message, variant: "destructive" });
@@ -873,6 +891,7 @@ export default function Gallery() {
                     pair={pair}
                     onOpen={() => setSelectedPair(pair)}
                     onRename={() => setRenamePairTarget(pair)}
+                    onMove={() => setMoveTarget({ type: "pair", pair })}
                     onDelete={() => setPendingDeletePair(pair)}
                   />
                 ))}
@@ -892,60 +911,82 @@ export default function Gallery() {
                 {filteredPhotos.map((photo, idx) => {
                   const isSelectedForPair = selectedForPair.includes(photo.id);
                   return (
-                    <button
+                    <div
                       key={photo.id}
-                      onClick={() => {
-                        if (pairingMode) {
-                          setSelectedForPair((prev) => {
-                            if (prev.includes(photo.id)) {
-                              return prev.filter((x) => x !== photo.id);
-                            }
-                            if (prev.length >= 2) {
-                              // replace oldest selection
-                              return [prev[1], photo.id];
-                            }
-                            return [...prev, photo.id];
-                          });
-                        } else {
-                          setSelectedIdx(idx);
-                        }
-                      }}
-                      className={`group relative aspect-square overflow-hidden rounded-lg bg-muted hover-elevate focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
-                        pairingMode && isSelectedForPair
-                          ? "ring-2 ring-primary ring-offset-2 ring-offset-background"
-                          : ""
-                      }`}
-                      data-testid={`button-photo-${photo.id}`}
-                      aria-label={
-                        pairingMode
-                          ? `${isSelectedForPair ? "Deselect" : "Select"} ${photo.originalName} for pairing`
-                          : `Open ${photo.originalName}`
-                      }
-                      aria-pressed={pairingMode ? isSelectedForPair : undefined}
+                      className="group relative aspect-square"
                     >
-                      <img
-                        src={photoThumbUrl(photo)}
-                        alt={photo.originalName}
-                        loading="lazy"
-                        className="w-full h-full object-cover"
-                      />
+                      <button
+                        onClick={() => {
+                          if (pairingMode) {
+                            setSelectedForPair((prev) => {
+                              if (prev.includes(photo.id)) {
+                                return prev.filter((x) => x !== photo.id);
+                              }
+                              if (prev.length >= 2) {
+                                // replace oldest selection
+                                return [prev[1], photo.id];
+                              }
+                              return [...prev, photo.id];
+                            });
+                          } else {
+                            setSelectedIdx(idx);
+                          }
+                        }}
+                        className={`absolute inset-0 w-full h-full overflow-hidden rounded-lg bg-muted hover-elevate focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
+                          pairingMode && isSelectedForPair
+                            ? "ring-2 ring-primary ring-offset-2 ring-offset-background"
+                            : ""
+                        }`}
+                        data-testid={`button-photo-${photo.id}`}
+                        aria-label={
+                          pairingMode
+                            ? `${isSelectedForPair ? "Deselect" : "Select"} ${photo.originalName} for pairing`
+                            : `Open ${photo.originalName}`
+                        }
+                        aria-pressed={pairingMode ? isSelectedForPair : undefined}
+                      >
+                        <img
+                          src={photoThumbUrl(photo)}
+                          alt={photo.originalName}
+                          loading="lazy"
+                          className="w-full h-full object-cover"
+                        />
+                        <div className="pointer-events-none absolute inset-x-0 bottom-0 p-2 bg-gradient-to-t from-black/55 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
+                          <p
+                            className="text-xs text-white truncate"
+                            data-testid={`text-name-${photo.id}`}
+                          >
+                            {photo.originalName}
+                          </p>
+                        </div>
+                      </button>
+
+                      {/* Pair selection number badge (sits above the button) */}
                       {pairingMode && isSelectedForPair && (
                         <div
-                          className="absolute top-2 right-2 h-6 w-6 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs font-semibold shadow"
+                          className="pointer-events-none absolute top-2 right-2 h-6 w-6 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs font-semibold shadow z-10"
                           data-testid={`pair-selection-badge-${photo.id}`}
                         >
                           {selectedForPair.indexOf(photo.id) + 1}
                         </div>
                       )}
-                      <div className="pointer-events-none absolute inset-x-0 bottom-0 p-2 bg-gradient-to-t from-black/55 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
-                        <p
-                          className="text-xs text-white truncate"
-                          data-testid={`text-name-${photo.id}`}
+
+                      {/* Quick Move button — hidden in pairing mode to keep selection clean */}
+                      {!pairingMode && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setMoveTarget({ type: "photo", photo });
+                          }}
+                          className="absolute top-2 right-2 h-7 w-7 inline-flex items-center justify-center rounded-md bg-black/55 backdrop-blur-sm text-white hover:bg-black/75 transition-opacity opacity-0 group-hover:opacity-100 z-10"
+                          aria-label="Move photo to folder"
+                          data-testid={`button-move-photo-${photo.id}`}
                         >
-                          {photo.originalName}
-                        </p>
-                      </div>
-                    </button>
+                          <FolderInput className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </div>
                   );
                 })}
               </div>
@@ -1231,7 +1272,14 @@ export default function Gallery() {
         onMoveFolder={(folderId, parentId) =>
           moveFolderMutation.mutate({ id: folderId, parentId })
         }
-        isPending={movePhotoMutation.isPending || moveFolderMutation.isPending}
+        onMovePair={(pairId, folderId) =>
+          movePairMutation.mutate({ id: pairId, folderId })
+        }
+        isPending={
+          movePhotoMutation.isPending ||
+          moveFolderMutation.isPending ||
+          movePairMutation.isPending
+        }
       />
 
       {/* Pair lightbox */}
@@ -1245,6 +1293,7 @@ export default function Gallery() {
             onClose={() => setSelectedPair(null)}
             onPrev={prevPair ? () => setSelectedPair(prevPair) : undefined}
             onNext={nextPair ? () => setSelectedPair(nextPair) : undefined}
+            onMove={() => setMoveTarget({ type: "pair", pair: selectedPair })}
           />
         );
       })()}
@@ -1628,15 +1677,18 @@ function MoveDialog({
   onClose,
   onMovePhoto,
   onMoveFolder,
+  onMovePair,
   isPending,
 }: {
   target:
     | { type: "photo"; photo: Photo }
     | { type: "folder"; folder: Folder }
+    | { type: "pair"; pair: PairWithPhotos }
     | null;
   onClose: () => void;
   onMovePhoto: (photoId: number, folderId: number | null) => void;
   onMoveFolder: (folderId: number, parentId: number | null) => void;
+  onMovePair: (pairId: number, folderId: number | null) => void;
   isPending: boolean;
 }) {
   // Load ALL folders so the user can pick any destination
@@ -1697,7 +1749,9 @@ function MoveDialog({
       ? target.photo.folderId
       : target?.type === "folder"
         ? target.folder.parentId
-        : null;
+        : target?.type === "pair"
+          ? target.pair.folderId
+          : null;
 
   const handlePick = (destId: number | null) => {
     if (!target) return;
@@ -1706,7 +1760,8 @@ function MoveDialog({
       return;
     }
     if (target.type === "photo") onMovePhoto(target.photo.id, destId);
-    else onMoveFolder(target.folder.id, destId);
+    else if (target.type === "folder") onMoveFolder(target.folder.id, destId);
+    else onMovePair(target.pair.id, destId);
   };
 
   const subjectName =
@@ -1714,7 +1769,9 @@ function MoveDialog({
       ? target.photo.originalName
       : target?.type === "folder"
         ? target.folder.name
-        : "";
+        : target?.type === "pair"
+          ? target.pair.name ?? `${target.pair.leftPhoto.originalName} · ${target.pair.rightPhoto.originalName}`
+          : "";
 
   return (
     <Dialog open={target !== null} onOpenChange={(o) => !o && onClose()}>

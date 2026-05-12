@@ -532,19 +532,36 @@ export async function registerRoutes(
   );
 
   // Rename a pair (name only). Body: { name }
-  const renamePairSchema = z.object({
-    name: z.union([z.string().trim().max(120), z.null()]),
-  });
+  // PATCH supports renaming (provide `name`) and/or moving (provide `folderId`).
+  const patchPairSchema = z
+    .object({
+      name: z.union([z.string().trim().max(120), z.null()]).optional(),
+      folderId: z.union([z.number().int(), z.null()]).optional(),
+    })
+    .refine((b) => b.name !== undefined || b.folderId !== undefined, {
+      message: "Provide `name` or `folderId`",
+    });
 
   app.patch("/api/pairs/:id", async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (Number.isNaN(id)) return res.status(400).json({ message: "Bad id" });
     try {
-      const body = renamePairSchema.parse(req.body);
+      const body = patchPairSchema.parse(req.body);
       const existing = await storage.getPair(id);
       if (!existing) return res.status(404).json({ message: "Not found" });
-      const updated = await storage.renamePair(id, body.name === "" ? null : body.name);
-      res.json(updated);
+      if (body.name !== undefined) {
+        await storage.renamePair(id, body.name === "" ? null : body.name);
+      }
+      if (body.folderId !== undefined) {
+        // Verify destination exists if not root
+        if (body.folderId !== null) {
+          const dest = await storage.getFolder(body.folderId);
+          if (!dest) return res.status(400).json({ message: "Destination folder not found" });
+        }
+        await storage.movePair(id, body.folderId);
+      }
+      const updated = await storage.getPair(id);
+      res.json(withPairUrls(updated!));
     } catch (err: any) {
       const msg = err?.errors?.[0]?.message || err?.message || "Bad request";
       res.status(400).json({ message: msg });

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { photoUrl, photoThumbUrl } from "@/lib/queryClient";
 import type { PairWithPhotos } from "@shared/schema";
-import { Columns2, ArrowLeftRight, X, Trash2, Pencil, ChevronLeft, ChevronRight } from "lucide-react";
+import { Columns2, ArrowLeftRight, X, Trash2, Pencil, ChevronLeft, ChevronRight, FolderInput } from "lucide-react";
 
 // -------- Pair card in the grid (side-by-side preview) --------
 
@@ -9,11 +9,13 @@ export function PairCard({
   pair,
   onOpen,
   onRename,
+  onMove,
   onDelete,
 }: {
   pair: PairWithPhotos;
   onOpen: () => void;
   onRename: () => void;
+  onMove: () => void;
   onDelete: () => void;
 }) {
   return (
@@ -88,6 +90,18 @@ export function PairCard({
           type="button"
           onClick={(e) => {
             e.stopPropagation();
+            onMove();
+          }}
+          className="h-7 w-7 inline-flex items-center justify-center rounded-md bg-black/55 backdrop-blur-sm text-white hover:bg-black/75 transition-colors"
+          aria-label="Move pair to folder"
+          data-testid={`button-move-pair-${pair.id}`}
+        >
+          <FolderInput className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
             onDelete();
           }}
           className="h-7 w-7 inline-flex items-center justify-center rounded-md bg-black/55 backdrop-blur-sm text-white hover:bg-red-600/80 transition-colors"
@@ -110,11 +124,13 @@ export function PairLightbox({
   onClose,
   onPrev,
   onNext,
+  onMove,
 }: {
   pair: PairWithPhotos;
   onClose: () => void;
   onPrev?: () => void;
   onNext?: () => void;
+  onMove?: () => void;
 }) {
   const [mode, setMode] = useState<PairViewMode>("side");
   const swipeStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -209,6 +225,18 @@ export function PairLightbox({
             Slider
           </button>
         </div>
+
+        {onMove && (
+          <button
+            type="button"
+            onClick={onMove}
+            className="inline-flex items-center justify-center h-9 w-9 rounded-md text-white hover:bg-white/10 transition-colors"
+            aria-label="Move pair to folder"
+            data-testid="button-move-pair-lightbox"
+          >
+            <FolderInput className="h-4 w-4" />
+          </button>
+        )}
 
         <button
           type="button"

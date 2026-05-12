@@ -79,6 +79,7 @@ export interface IStorage {
   getPair(id: number): Promise<PairWithPhotos | undefined>;
   createPair(input: { name?: string | null; leftPhotoId: number; rightPhotoId: number; folderId: number | null }): Promise<PairWithPhotos>;
   renamePair(id: number, name: string | null): Promise<Pair | undefined>;
+  movePair(id: number, folderId: number | null): Promise<PairWithPhotos | undefined>;
   deletePair(id: number, removePhotos: boolean): Promise<{ filenamesRemoved: string[]; cloudinaryIdsRemoved: string[] }>;
   // Helper to look up which folders contain pairs (for recursive deletes)
 }
@@ -322,6 +323,18 @@ export class DatabaseStorage implements IStorage {
 
   async renamePair(id: number, name: string | null): Promise<Pair | undefined> {
     return db.update(pairs).set({ name }).where(eq(pairs.id, id)).returning().get();
+  }
+
+  async movePair(id: number, folderId: number | null): Promise<PairWithPhotos | undefined> {
+    const existing = db.select().from(pairs).where(eq(pairs.id, id)).get();
+    if (!existing) return undefined;
+    // Move pair + both child photos to the destination folder atomically.
+    db.update(pairs).set({ folderId }).where(eq(pairs.id, id)).run();
+    db.update(photos)
+      .set({ folderId })
+      .where(inArray(photos.id, [existing.leftPhotoId, existing.rightPhotoId]))
+      .run();
+    return this.getPair(id);
   }
 
   async deletePair(id: number, removePhotos: boolean): Promise<{ filenamesRemoved: string[]; cloudinaryIdsRemoved: string[] }> {
