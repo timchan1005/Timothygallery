@@ -88,9 +88,8 @@ function issueToken(): string {
 
 function requireAuth(req: Request, res: Response, next: () => void) {
   // Mounted at /api, so req.path here lacks the /api prefix.
-  // Allow /api/photos/:id/raw and /download with token in query string (for <img src> / <a download>).
-  const p = req.path;
-  if (/^\/photos\/\d+\/(raw|download)$/.test(p)) {
+  // Allow /photos/:id/raw and /download with token in query string (for <img src> / <a download>).
+  if (/^\/?photos\/\d+\/(raw|download)$/.test(req.path)) {
     const qt = typeof req.query.t === "string" ? req.query.t : "";
     if (activeTokens.has(qt)) return next();
   }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { API_BASE } from "@/lib/queryClient";
+import { API_BASE, withToken } from "@/lib/queryClient";
 import type { PairWithPhotos } from "@shared/schema";
 import { Columns2, ArrowLeftRight, X, Trash2, Pencil } from "lucide-react";
 
@@ -29,13 +29,13 @@ export function PairCard({
         data-testid={`button-open-pair-${pair.id}`}
       >
         <img
-          src={`${API_BASE}/api/photos/${pair.leftPhoto.id}/raw`}
+          src={withToken(`${API_BASE}/api/photos/${pair.leftPhoto.id}/raw`)}
           alt={pair.leftPhoto.originalName}
           className="w-full h-full object-cover"
           loading="lazy"
         />
         <img
-          src={`${API_BASE}/api/photos/${pair.rightPhoto.id}/raw`}
+          src={withToken(`${API_BASE}/api/photos/${pair.rightPhoto.id}/raw`)}
           alt={pair.rightPhoto.originalName}
           className="w-full h-full object-cover"
           loading="lazy"
@@ -201,7 +201,7 @@ function SideBySideView({ pair }: { pair: PairWithPhotos }) {
     >
       <div className="flex-1 min-h-0 relative flex items-center justify-center">
         <img
-          src={`${API_BASE}/api/photos/${pair.leftPhoto.id}/raw`}
+          src={withToken(`${API_BASE}/api/photos/${pair.leftPhoto.id}/raw`)}
           alt={pair.leftPhoto.originalName}
           className="max-w-full max-h-full object-contain select-none"
           data-testid="img-pair-left"
@@ -209,7 +209,7 @@ function SideBySideView({ pair }: { pair: PairWithPhotos }) {
       </div>
       <div className="flex-1 min-h-0 relative flex items-center justify-center">
         <img
-          src={`${API_BASE}/api/photos/${pair.rightPhoto.id}/raw`}
+          src={withToken(`${API_BASE}/api/photos/${pair.rightPhoto.id}/raw`)}
           alt={pair.rightPhoto.originalName}
           className="max-w-full max-h-full object-contain select-none"
           data-testid="img-pair-right"
@@ -266,7 +266,7 @@ function SliderView({ pair }: { pair: PairWithPhotos }) {
     >
       {/* Right photo as the base layer */}
       <img
-        src={`${API_BASE}/api/photos/${pair.rightPhoto.id}/raw`}
+        src={withToken(`${API_BASE}/api/photos/${pair.rightPhoto.id}/raw`)}
         alt={pair.rightPhoto.originalName}
         className="absolute inset-0 w-full h-full object-contain bg-black pointer-events-none"
         draggable={false}
@@ -277,7 +277,7 @@ function SliderView({ pair }: { pair: PairWithPhotos }) {
         style={{ clipPath: `inset(0 ${100 - pct}% 0 0)` }}
       >
         <img
-          src={`${API_BASE}/api/photos/${pair.leftPhoto.id}/raw`}
+          src={withToken(`${API_BASE}/api/photos/${pair.leftPhoto.id}/raw`)}
           alt={pair.leftPhoto.originalName}
           className="absolute inset-0 w-full h-full object-contain bg-black"
           draggable={false}
