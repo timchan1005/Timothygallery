@@ -18,50 +18,60 @@ export function PairCard({
 }) {
   return (
     <div
-      className="group relative col-span-2 row-span-1 aspect-[2/1] rounded-lg overflow-hidden bg-muted hover-elevate"
+      className="group relative aspect-square"
       data-testid={`pair-card-${pair.id}`}
     >
       <button
         type="button"
         onClick={onOpen}
-        className="absolute inset-0 w-full h-full grid grid-cols-2 gap-0.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        className="absolute inset-0 w-full h-full focus:outline-none rounded-lg"
         aria-label={`Open pair${pair.name ? ` ${pair.name}` : ""}`}
         data-testid={`button-open-pair-${pair.id}`}
       >
-        <img
-          src={photoThumbUrl(pair.leftPhoto)}
-          alt={pair.leftPhoto.originalName}
-          className="w-full h-full object-cover"
-          loading="lazy"
-        />
-        <img
-          src={photoThumbUrl(pair.rightPhoto)}
-          alt={pair.rightPhoto.originalName}
-          className="w-full h-full object-cover"
-          loading="lazy"
-        />
+        {/* Back card (right photo) — offset & rotated to peek out from behind */}
+        <div className="absolute inset-1.5 rounded-lg overflow-hidden bg-muted shadow-md ring-1 ring-black/10 dark:ring-white/10 transform rotate-[4deg] translate-x-1 translate-y-1 transition-transform duration-200 group-hover:rotate-[6deg] group-hover:translate-x-1.5 group-hover:translate-y-1.5">
+          <img
+            src={photoThumbUrl(pair.rightPhoto)}
+            alt=""
+            aria-hidden="true"
+            className="w-full h-full object-cover"
+            loading="lazy"
+            draggable={false}
+          />
+        </div>
+
+        {/* Front card (left photo) — sits on top */}
+        <div className="absolute inset-0 rounded-lg overflow-hidden bg-muted shadow-lg ring-1 ring-black/10 dark:ring-white/10 transform transition-transform duration-200 group-hover:-rotate-[2deg] group-hover:-translate-x-0.5 group-hover:-translate-y-0.5 hover-elevate">
+          <img
+            src={photoThumbUrl(pair.leftPhoto)}
+            alt={pair.leftPhoto.originalName}
+            className="w-full h-full object-cover"
+            loading="lazy"
+            draggable={false}
+          />
+
+          {/* Pair badge */}
+          <div className="pointer-events-none absolute top-2 left-2 inline-flex items-center gap-1 rounded-full bg-black/55 backdrop-blur-sm px-2 py-1 text-[11px] font-medium text-white">
+            <Columns2 className="h-3 w-3" />
+            Pair
+          </div>
+
+          {/* Label gradient */}
+          {pair.name && (
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 p-2 bg-gradient-to-t from-black/60 to-transparent">
+              <p
+                className="text-xs text-white truncate"
+                data-testid={`text-pair-name-${pair.id}`}
+              >
+                {pair.name}
+              </p>
+            </div>
+          )}
+        </div>
       </button>
 
-      {/* Pair badge */}
-      <div className="pointer-events-none absolute top-2 left-2 inline-flex items-center gap-1 rounded-full bg-black/55 backdrop-blur-sm px-2 py-1 text-[11px] font-medium text-white">
-        <Columns2 className="h-3 w-3" />
-        Pair
-      </div>
-
-      {/* Label gradient */}
-      {pair.name && (
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 p-2 bg-gradient-to-t from-black/60 to-transparent">
-          <p
-            className="text-xs text-white truncate"
-            data-testid={`text-pair-name-${pair.id}`}
-          >
-            {pair.name}
-          </p>
-        </div>
-      )}
-
-      {/* Actions */}
-      <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      {/* Actions — kept above the stack so they remain clickable */}
+      <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
         <button
           type="button"
           onClick={(e) => {
