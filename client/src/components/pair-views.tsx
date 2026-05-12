@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { photoUrl, photoThumbUrl } from "@/lib/queryClient";
 import type { PairWithPhotos } from "@shared/schema";
-import { Columns2, ArrowLeftRight, X, Trash2, Pencil } from "lucide-react";
+import { Columns2, ArrowLeftRight, X, Trash2, Pencil, ChevronLeft, ChevronRight } from "lucide-react";
 
 // -------- Pair card in the grid (side-by-side preview) --------
 
@@ -98,21 +98,47 @@ type PairViewMode = "side" | "slider";
 export function PairLightbox({
   pair,
   onClose,
+  onPrev,
+  onNext,
 }: {
   pair: PairWithPhotos;
   onClose: () => void;
+  onPrev?: () => void;
+  onNext?: () => void;
 }) {
   const [mode, setMode] = useState<PairViewMode>("side");
+  const swipeStartRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
       else if (e.key === "s" || e.key === "S")
         setMode((m) => (m === "side" ? "slider" : "side"));
+      else if (e.key === "ArrowLeft" && onPrev) onPrev();
+      else if (e.key === "ArrowRight" && onNext) onNext();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, onPrev, onNext]);
+
+  // Swipe handler for outside-of-image area (background): horizontal swipe = navigate pairs.
+  const onSwipeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    swipeStartRef.current = { x: e.clientX, y: e.clientY };
+  }, []);
+  const onSwipeEnd = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const start = swipeStartRef.current;
+      swipeStartRef.current = null;
+      if (!start) return;
+      const dx = e.clientX - start.x;
+      const dy = e.clientY - start.y;
+      // Require mostly-horizontal motion of at least 50px to count as a swipe.
+      if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.2) return;
+      if (dx > 0 && onPrev) onPrev();
+      else if (dx < 0 && onNext) onNext();
+    },
+    [onPrev, onNext]
+  );
 
   return (
     <div
@@ -121,6 +147,9 @@ export function PairLightbox({
       role="dialog"
       aria-modal="true"
       aria-label={pair.name ?? "Photo pair"}
+      onPointerDown={onSwipeStart}
+      onPointerUp={onSwipeEnd}
+      onPointerCancel={() => (swipeStartRef.current = null)}
     >
       <div className="flex items-center gap-2 p-3 sm:p-4 text-white">
         <div className="min-w-0 flex-1">
@@ -182,13 +211,41 @@ export function PairLightbox({
         </button>
       </div>
 
-      <div className="flex-1 relative flex items-center justify-center px-2 sm:px-4 pb-4">
+      <div className="flex-1 relative flex items-center justify-center px-2 sm:px-4 pb-2">
         {mode === "side" ? (
           <SideBySideView pair={pair} />
         ) : (
           <SliderView pair={pair} />
         )}
       </div>
+
+      {/* Prev / Next bottom bar */}
+      {(onPrev || onNext) && (
+        <div className="flex items-center justify-center gap-3 pb-3 sm:pb-4 text-white">
+          <button
+            type="button"
+            onClick={onPrev}
+            disabled={!onPrev}
+            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:hover:bg-white/10 disabled:cursor-not-allowed transition-colors text-sm"
+            aria-label="Previous pair"
+            data-testid="button-prev-pair"
+          >
+            <ChevronLeft className="h-4 w-4" />
+            Previous
+          </button>
+          <button
+            type="button"
+            onClick={onNext}
+            disabled={!onNext}
+            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:hover:bg-white/10 disabled:cursor-not-allowed transition-colors text-sm"
+            aria-label="Next pair"
+            data-testid="button-next-pair"
+          >
+            Next
+            <ChevronRight className="h-4 w-4" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -235,6 +292,7 @@ function SliderView({ pair }: { pair: PairWithPhotos }) {
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
+      e.stopPropagation();
       draggingRef.current = true;
       (e.target as Element).setPointerCapture?.(e.pointerId);
       setFromClientX(e.clientX);
@@ -250,7 +308,8 @@ function SliderView({ pair }: { pair: PairWithPhotos }) {
     [setFromClientX]
   );
 
-  const onPointerUp = useCallback(() => {
+  const onPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
     draggingRef.current = false;
   }, []);
 

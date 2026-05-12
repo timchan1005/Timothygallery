@@ -1235,12 +1235,19 @@ export default function Gallery() {
       />
 
       {/* Pair lightbox */}
-      {selectedPair && (
-        <PairLightbox
-          pair={selectedPair}
-          onClose={() => setSelectedPair(null)}
-        />
-      )}
+      {selectedPair && (() => {
+        const idx = filteredPairs.findIndex((p) => p.id === selectedPair.id);
+        const prevPair = idx > 0 ? filteredPairs[idx - 1] : null;
+        const nextPair = idx >= 0 && idx < filteredPairs.length - 1 ? filteredPairs[idx + 1] : null;
+        return (
+          <PairLightbox
+            pair={selectedPair}
+            onClose={() => setSelectedPair(null)}
+            onPrev={prevPair ? () => setSelectedPair(prevPair) : undefined}
+            onNext={nextPair ? () => setSelectedPair(nextPair) : undefined}
+          />
+        );
+      })()}
 
       {/* Rename pair dialog */}
       <RenamePairDialog
