@@ -257,7 +257,7 @@ function SliderView({ pair }: { pair: PairWithPhotos }) {
   return (
     <div
       ref={containerRef}
-      className="relative w-full max-w-5xl aspect-[4/3] overflow-hidden rounded-md select-none touch-none cursor-ew-resize"
+      className="relative w-full h-full overflow-hidden rounded-md select-none touch-none cursor-ew-resize"
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
