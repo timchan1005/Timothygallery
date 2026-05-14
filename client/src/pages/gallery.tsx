@@ -202,8 +202,51 @@ export default function Gallery() {
     | { type: "photo"; photo: Photo }
     | { type: "folder"; folder: Folder }
     | { type: "pair"; pair: PairWithPhotos }
+    | { type: "bulk"; photoIds: number[]; pairIds: number[]; folderIds: number[]; label: string }
     | null
   >(null);
+
+  // ---- Multi-select state ----
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<number>>(new Set());
+  const [selectedPairIds, setSelectedPairIds] = useState<Set<number>>(new Set());
+  const [selectedFolderIds, setSelectedFolderIds] = useState<Set<number>>(new Set());
+  const selectionCount =
+    selectedPhotoIds.size + selectedPairIds.size + selectedFolderIds.size;
+  const clearSelection = useCallback(() => {
+    setSelectedPhotoIds(new Set());
+    setSelectedPairIds(new Set());
+    setSelectedFolderIds(new Set());
+  }, []);
+  const togglePhotoSel = useCallback((id: number) => {
+    setSelectedPhotoIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const togglePairSel = useCallback((id: number) => {
+    setSelectedPairIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const toggleFolderSel = useCallback((id: number) => {
+    setSelectedFolderIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  // ---- Drag-and-drop state (internal: items → folders) ----
+  const [dropTargetFolderId, setDropTargetFolderId] = useState<number | null | undefined>(
+    undefined
+  );
 
   // Queries
   const folderKey = ["/api/folders", { parentId: currentFolderId ?? "root" }];
@@ -383,6 +426,32 @@ export default function Gallery() {
     },
   });
 
+  // ---- Bulk move (multi-select OR drag-and-drop) ----
+  const bulkMoveMutation = useMutation({
+    mutationFn: async (input: {
+      photoIds?: number[];
+      pairIds?: number[];
+      folderIds?: number[];
+      destFolderId: number | null;
+    }) => {
+      const res = await apiRequest("POST", "/api/bulk/move", input);
+      return (await res.json()) as { moved: number };
+    },
+    onSuccess: ({ moved }) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/photos"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/pairs"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/folders"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/folders/all-with-paths"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/folders/path"] });
+      setMoveTarget(null);
+      clearSelection();
+      toast({ title: moved === 1 ? "Moved 1 item" : `Moved ${moved} items` });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Move failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const deletePhotoMutation = useMutation({
     mutationFn: async (id: number) => {
       await apiRequest("DELETE", `/api/photos/${id}`);
@@ -516,6 +585,91 @@ export default function Gallery() {
       window.removeEventListener("drop", onDrop);
     };
   }, [uploadMutation]);
+
+  // ---------- internal drag-and-drop (items → folders) ----------
+
+  // We store a JSON payload under our own MIME so the file-upload listeners
+  // (which look for the "Files" type) ignore these drags.
+  const DND_MIME = "application/x-lumen-items";
+  type DndPayload = {
+    photoIds: number[];
+    pairIds: number[];
+    folderIds: number[];
+  };
+
+  // Build a payload from either current selection or a single dragged item.
+  const payloadFromDrag = (kind: "photo" | "pair" | "folder", id: number): DndPayload => {
+    const inSel =
+      (kind === "photo" && selectedPhotoIds.has(id)) ||
+      (kind === "pair" && selectedPairIds.has(id)) ||
+      (kind === "folder" && selectedFolderIds.has(id));
+    if (inSel && selectionCount > 1) {
+      return {
+        photoIds: Array.from(selectedPhotoIds),
+        pairIds: Array.from(selectedPairIds),
+        folderIds: Array.from(selectedFolderIds),
+      };
+    }
+    return {
+      photoIds: kind === "photo" ? [id] : [],
+      pairIds: kind === "pair" ? [id] : [],
+      folderIds: kind === "folder" ? [id] : [],
+    };
+  };
+
+  const handleItemDragStart = (
+    e: React.DragEvent,
+    kind: "photo" | "pair" | "folder",
+    id: number
+  ) => {
+    const payload = payloadFromDrag(kind, id);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData(DND_MIME, JSON.stringify(payload));
+    // Fallback for browsers that strip custom MIMEs during drag preview
+    e.dataTransfer.setData("text/plain", "lumen-items");
+  };
+
+  const isInternalDrag = (e: React.DragEvent) =>
+    e.dataTransfer.types && Array.from(e.dataTransfer.types).includes(DND_MIME);
+
+  const handleFolderDropOver = (e: React.DragEvent, folderId: number | null) => {
+    if (!isInternalDrag(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "move";
+    if (dropTargetFolderId !== folderId) setDropTargetFolderId(folderId);
+  };
+  const handleFolderDropLeave = (e: React.DragEvent) => {
+    if (!isInternalDrag(e)) return;
+    setDropTargetFolderId(undefined);
+  };
+  const handleFolderDrop = (e: React.DragEvent, destFolderId: number | null) => {
+    if (!isInternalDrag(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setDropTargetFolderId(undefined);
+    let payload: DndPayload;
+    try {
+      payload = JSON.parse(e.dataTransfer.getData(DND_MIME)) as DndPayload;
+    } catch {
+      return;
+    }
+    // Don't move a folder into itself (UI guard; server also rejects)
+    if (destFolderId !== null && payload.folderIds.includes(destFolderId)) {
+      toast({
+        title: "Can't drop a folder onto itself",
+        variant: "destructive",
+      });
+      return;
+    }
+    // If everything dropped is already in this folder, no-op silently.
+    bulkMoveMutation.mutate({
+      photoIds: payload.photoIds,
+      pairIds: payload.pairIds,
+      folderIds: payload.folderIds,
+      destFolderId,
+    });
+  };
 
   // ---------- filtering & selection ----------
 
@@ -769,7 +923,14 @@ export default function Gallery() {
             <button
               type="button"
               onClick={() => setCurrentFolderId(null)}
-              className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md hover-elevate"
+              onDragOver={(e) => handleFolderDropOver(e, null)}
+              onDragLeave={handleFolderDropLeave}
+              onDrop={(e) => handleFolderDrop(e, null)}
+              className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md hover-elevate transition-colors ${
+                dropTargetFolderId === null && currentFolderId !== null
+                  ? "ring-2 ring-primary bg-primary/10"
+                  : ""
+              }`}
               data-testid="crumb-root"
             >
               <Home className="h-3.5 w-3.5" />
@@ -791,7 +952,14 @@ export default function Gallery() {
                     <button
                       type="button"
                       onClick={() => setCurrentFolderId(f.id)}
-                      className="px-2 py-1 rounded-md hover-elevate"
+                      onDragOver={(e) => handleFolderDropOver(e, f.id)}
+                      onDragLeave={handleFolderDropLeave}
+                      onDrop={(e) => handleFolderDrop(e, f.id)}
+                      className={`px-2 py-1 rounded-md hover-elevate transition-colors ${
+                        dropTargetFolderId === f.id
+                          ? "ring-2 ring-primary bg-primary/10"
+                          : ""
+                      }`}
                       data-testid={`crumb-${f.id}`}
                     >
                       {f.name}
@@ -879,6 +1047,27 @@ export default function Gallery() {
                 </button>
               </div>
 
+              <Button
+                variant={selectMode ? "default" : "outline"}
+                size="sm"
+                onClick={() => {
+                  setSelectMode((v) => {
+                    const next = !v;
+                    if (!next) clearSelection();
+                    return next;
+                  });
+                  if (pairingMode) {
+                    setPairingMode(false);
+                    setSelectedForPair([]);
+                  }
+                }}
+                className="gap-1.5"
+                data-testid="button-toggle-select-mode"
+              >
+                <Check className="h-3.5 w-3.5" />
+                {selectMode ? "Done" : "Select"}
+              </Button>
+
               {filteredPhotos.length >= 2 && (
                 <Button
                   variant={pairingMode ? "default" : "outline"}
@@ -896,6 +1085,50 @@ export default function Gallery() {
               )}
             </div>
           </div>
+
+          {/* Selection toolbar */}
+          {(selectMode || selectionCount > 0) && (
+            <div
+              className="mb-4 flex items-center gap-3 rounded-lg border border-primary/30 bg-primary/5 px-4 py-2.5"
+              data-testid="selection-toolbar"
+            >
+              <Check className="h-4 w-4 text-primary shrink-0" />
+              <p className="text-sm flex-1" data-testid="text-selection-count">
+                {selectionCount === 0
+                  ? "Tap items to select. Selection persists across folders."
+                  : `${selectionCount} selected`}
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  if (selectionCount === 0) return;
+                  setMoveTarget({
+                    type: "bulk",
+                    photoIds: Array.from(selectedPhotoIds),
+                    pairIds: Array.from(selectedPairIds),
+                    folderIds: Array.from(selectedFolderIds),
+                    label: `${selectionCount} ${selectionCount === 1 ? "item" : "items"}`,
+                  });
+                }}
+                disabled={selectionCount === 0}
+                className="gap-1.5"
+                data-testid="button-bulk-move"
+              >
+                <FolderInput className="h-3.5 w-3.5" />
+                Move
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => clearSelection()}
+                disabled={selectionCount === 0}
+                data-testid="button-clear-selection"
+              >
+                Clear
+              </Button>
+            </div>
+          )}
 
           {/* Pairing mode banner */}
           {pairingMode && (
@@ -963,6 +1196,15 @@ export default function Gallery() {
                     onRename={() => setRenameTarget(folder)}
                     onMove={() => setMoveTarget({ type: "folder", folder })}
                     onDelete={() => setPendingDeleteFolder(folder)}
+                    draggable
+                    onDragStart={(e) => handleItemDragStart(e, "folder", folder.id)}
+                    onDragOver={(e) => handleFolderDropOver(e, folder.id)}
+                    onDragLeave={handleFolderDropLeave}
+                    onDrop={(e) => handleFolderDrop(e, folder.id)}
+                    isDropTarget={dropTargetFolderId === folder.id}
+                    selectMode={selectMode}
+                    isSelected={selectedFolderIds.has(folder.id)}
+                    onToggleSelect={() => toggleFolderSel(folder.id)}
                   />
                 ))}
               </div>
@@ -984,6 +1226,11 @@ export default function Gallery() {
                     onRename={() => setRenamePairTarget(pair)}
                     onMove={() => setMoveTarget({ type: "pair", pair })}
                     onDelete={() => setPendingDeletePair(pair)}
+                    draggable={!pairingMode}
+                    onDragStart={(e) => handleItemDragStart(e, "pair", pair.id)}
+                    selectMode={selectMode}
+                    isSelected={selectedPairIds.has(pair.id)}
+                    onToggleSelect={() => togglePairSel(pair.id)}
                   />
                 ))}
               </div>
@@ -1002,8 +1249,11 @@ export default function Gallery() {
                 <div className="gallery-list" data-testid="gallery-list">
                   {filteredPhotos.map((photo, idx) => {
                     const isSelectedForPair = selectedForPair.includes(photo.id);
+                    const isMultiSel = selectedPhotoIds.has(photo.id);
                     const onPick = () => {
-                      if (pairingMode) {
+                      if (selectMode) {
+                        togglePhotoSel(photo.id);
+                      } else if (pairingMode) {
                         setSelectedForPair((prev) => {
                           if (prev.includes(photo.id)) return prev.filter((x) => x !== photo.id);
                           if (prev.length >= 2) return [prev[1], photo.id];
@@ -1016,12 +1266,26 @@ export default function Gallery() {
                     return (
                       <div
                         key={photo.id}
+                        draggable={!pairingMode}
+                        onDragStart={(e) => handleItemDragStart(e, "photo", photo.id)}
                         className={`group relative flex items-center gap-3 rounded-md px-2 py-2 hover-elevate ${
-                          pairingMode && isSelectedForPair
+                          (pairingMode && isSelectedForPair) || isMultiSel
                             ? "ring-2 ring-primary"
                             : ""
                         }`}
                       >
+                        {selectMode && (
+                          <div
+                            className={`h-5 w-5 shrink-0 rounded border-2 flex items-center justify-center transition-colors ${
+                              isMultiSel
+                                ? "bg-primary border-primary text-primary-foreground"
+                                : "border-muted-foreground"
+                            }`}
+                            aria-hidden="true"
+                          >
+                            {isMultiSel && <Check className="h-3 w-3" />}
+                          </div>
+                        )}
                         <button
                           onClick={onPick}
                           className="flex items-center gap-3 flex-1 min-w-0 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-md"
@@ -1096,14 +1360,19 @@ export default function Gallery() {
                 >
                   {filteredPhotos.map((photo, idx) => {
                     const isSelectedForPair = selectedForPair.includes(photo.id);
+                    const isMultiSel = selectedPhotoIds.has(photo.id);
                     return (
                       <div
                         key={photo.id}
+                        draggable={!pairingMode}
+                        onDragStart={(e) => handleItemDragStart(e, "photo", photo.id)}
                         className="group relative aspect-square"
                       >
                         <button
                           onClick={() => {
-                            if (pairingMode) {
+                            if (selectMode) {
+                              togglePhotoSel(photo.id);
+                            } else if (pairingMode) {
                               setSelectedForPair((prev) => {
                                 if (prev.includes(photo.id)) {
                                   return prev.filter((x) => x !== photo.id);
@@ -1119,7 +1388,7 @@ export default function Gallery() {
                             }
                           }}
                           className={`absolute inset-0 w-full h-full overflow-hidden rounded-lg bg-muted hover-elevate focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
-                            pairingMode && isSelectedForPair
+                            (pairingMode && isSelectedForPair) || isMultiSel
                               ? "ring-2 ring-primary ring-offset-2 ring-offset-background"
                               : ""
                           }`}
@@ -1131,6 +1400,18 @@ export default function Gallery() {
                           }
                           aria-pressed={pairingMode ? isSelectedForPair : undefined}
                         >
+                          {selectMode && (
+                            <div
+                              className={`absolute top-1.5 left-1.5 z-10 h-5 w-5 rounded border-2 flex items-center justify-center transition-colors ${
+                                isMultiSel
+                                  ? "bg-primary border-primary text-primary-foreground"
+                                  : "bg-background/80 border-white"
+                              }`}
+                              aria-hidden="true"
+                            >
+                              {isMultiSel && <Check className="h-3 w-3" />}
+                            </div>
+                          )}
                           <img
                             src={photoThumbUrl(photo)}
                             alt={photo.originalName}
@@ -1491,10 +1772,14 @@ export default function Gallery() {
         onMovePair={(pairId, folderId) =>
           movePairMutation.mutate({ id: pairId, folderId })
         }
+        onMoveBulk={(input, destFolderId) =>
+          bulkMoveMutation.mutate({ ...input, destFolderId })
+        }
         isPending={
           movePhotoMutation.isPending ||
           moveFolderMutation.isPending ||
-          movePairMutation.isPending
+          movePairMutation.isPending ||
+          bulkMoveMutation.isPending
         }
       />
 
@@ -1639,24 +1924,67 @@ function FolderCard({
   onRename,
   onMove,
   onDelete,
+  draggable,
+  onDragStart,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  isDropTarget,
+  selectMode,
+  isSelected,
+  onToggleSelect,
 }: {
   folder: Folder;
   onOpen: () => void;
   onRename: () => void;
   onMove: () => void;
   onDelete: () => void;
+  draggable?: boolean;
+  onDragStart?: (e: React.DragEvent) => void;
+  onDragOver?: (e: React.DragEvent) => void;
+  onDragLeave?: (e: React.DragEvent) => void;
+  onDrop?: (e: React.DragEvent) => void;
+  isDropTarget?: boolean;
+  selectMode?: boolean;
+  isSelected?: boolean;
+  onToggleSelect?: () => void;
 }) {
   return (
     <div
-      className="group relative border border-card-border rounded-lg bg-card hover-elevate"
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      className={`group relative border border-card-border rounded-lg bg-card hover-elevate transition-colors ${
+        isDropTarget ? "ring-2 ring-primary bg-primary/10" : ""
+      } ${isSelected ? "ring-2 ring-primary" : ""}`}
       data-testid={`folder-${folder.id}`}
     >
+      {selectMode && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleSelect?.();
+          }}
+          className={`absolute top-1.5 left-1.5 z-10 h-5 w-5 rounded border-2 flex items-center justify-center transition-colors ${
+            isSelected
+              ? "bg-primary border-primary text-primary-foreground"
+              : "bg-background/90 border-muted-foreground"
+          }`}
+          aria-label={isSelected ? `Deselect ${folder.name}` : `Select ${folder.name}`}
+          data-testid={`checkbox-folder-${folder.id}`}
+        >
+          {isSelected && <Check className="h-3 w-3" />}
+        </button>
+      )}
       <button
         type="button"
-        onClick={onOpen}
+        onClick={selectMode ? onToggleSelect : onOpen}
         className="w-full flex items-center gap-3 p-3 text-left"
         data-testid={`button-open-folder-${folder.id}`}
-        aria-label={`Open ${folder.name}`}
+        aria-label={selectMode ? `Toggle selection of ${folder.name}` : `Open ${folder.name}`}
       >
         <div className="flex-shrink-0 w-9 h-9 rounded-md bg-primary/10 text-primary flex items-center justify-center">
           <FolderIcon className="h-4 w-4" />
@@ -1888,65 +2216,64 @@ function buildFolderTree(all: Folder[]): FolderNode[] {
   return attach(null);
 }
 
+type FolderWithPath = Folder & { path: string };
+
 function MoveDialog({
   target,
   onClose,
   onMovePhoto,
   onMoveFolder,
   onMovePair,
+  onMoveBulk,
   isPending,
 }: {
   target:
     | { type: "photo"; photo: Photo }
     | { type: "folder"; folder: Folder }
     | { type: "pair"; pair: PairWithPhotos }
+    | { type: "bulk"; photoIds: number[]; pairIds: number[]; folderIds: number[]; label: string }
     | null;
   onClose: () => void;
   onMovePhoto: (photoId: number, folderId: number | null) => void;
   onMoveFolder: (folderId: number, parentId: number | null) => void;
   onMovePair: (pairId: number, folderId: number | null) => void;
+  onMoveBulk: (
+    input: { photoIds: number[]; pairIds: number[]; folderIds: number[] },
+    destFolderId: number | null
+  ) => void;
   isPending: boolean;
 }) {
-  // Load ALL folders so the user can pick any destination
-  const { data: allFolders = [] } = useQuery<Folder[]>({
-    queryKey: ["/api/folders/all"],
+  // Load ALL folders (with their full ancestry path) for destination picking
+  const { data: allFolders = [] } = useQuery<FolderWithPath[]>({
+    queryKey: ["/api/folders/all-with-paths"],
     enabled: target !== null,
-    queryFn: async () => {
-      // Build by walking from root. Simpler: fetch root, then recurse on each.
-      // For simplicity, we list every folder via repeated requests through a quick traversal.
-      const collect: Folder[] = [];
-      const queue: (number | null)[] = [null];
-      const seen = new Set<string>();
-      while (queue.length) {
-        const pid = queue.shift()!;
-        const key = pid === null ? "root" : String(pid);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const url = pid === null ? "/api/folders" : `/api/folders?parentId=${pid}`;
-        const r = await apiRequest("GET", url);
-        const list = (await r.json()) as Folder[];
-        for (const f of list) {
-          collect.push(f);
-          queue.push(f.id);
-        }
-      }
-      return collect;
-    },
   });
+
+  // Build a map for path lookups
+  const pathById = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const f of allFolders) m.set(f.id, f.path);
+    return m;
+  }, [allFolders]);
 
   const tree = useMemo(() => buildFolderTree(allFolders), [allFolders]);
 
-  // Compute disabled set for folder moves: cannot move into itself or its descendants
+  // Compute disabled set: cannot move folder(s) into themselves or any descendant
   const disabledIds = useMemo(() => {
-    if (!target || target.type !== "folder") return new Set<number>();
-    const result = new Set<number>([target.folder.id]);
+    const result = new Set<number>();
+    if (!target) return result;
+    const folderIdsBeingMoved: number[] = [];
+    if (target.type === "folder") folderIdsBeingMoved.push(target.folder.id);
+    else if (target.type === "bulk") folderIdsBeingMoved.push(...target.folderIds);
+    if (folderIdsBeingMoved.length === 0) return result;
     const childrenByParent = new Map<number | null, Folder[]>();
     for (const f of allFolders) {
       const key = f.parentId ?? null;
       if (!childrenByParent.has(key)) childrenByParent.set(key, []);
       childrenByParent.get(key)!.push(f);
     }
-    const stack = [target.folder.id];
+    const stack = [...folderIdsBeingMoved];
+    for (const id of folderIdsBeingMoved) result.add(id);
     while (stack.length) {
       const id = stack.pop()!;
       const kids = childrenByParent.get(id) || [];
@@ -1971,13 +2298,23 @@ function MoveDialog({
 
   const handlePick = (destId: number | null) => {
     if (!target) return;
-    if (destId === currentParent) {
+    if (target.type !== "bulk" && destId === currentParent) {
       onClose();
       return;
     }
     if (target.type === "photo") onMovePhoto(target.photo.id, destId);
     else if (target.type === "folder") onMoveFolder(target.folder.id, destId);
-    else onMovePair(target.pair.id, destId);
+    else if (target.type === "pair") onMovePair(target.pair.id, destId);
+    else if (target.type === "bulk") {
+      onMoveBulk(
+        {
+          photoIds: target.photoIds,
+          pairIds: target.pairIds,
+          folderIds: target.folderIds,
+        },
+        destId
+      );
+    }
   };
 
   const subjectName =
@@ -1987,7 +2324,9 @@ function MoveDialog({
         ? target.folder.name
         : target?.type === "pair"
           ? target.pair.name ?? `${target.pair.leftPhoto.originalName} · ${target.pair.rightPhoto.originalName}`
-          : "";
+          : target?.type === "bulk"
+            ? target.label
+            : "";
 
   return (
     <Dialog open={target !== null} onOpenChange={(o) => !o && onClose()}>
@@ -2016,6 +2355,7 @@ function MoveDialog({
               depth={1}
               currentParent={currentParent}
               disabledIds={disabledIds}
+              pathById={pathById}
               onPick={handlePick}
             />
           ))}
@@ -2036,18 +2376,27 @@ function FolderTreeBranch({
   depth,
   currentParent,
   disabledIds,
+  pathById,
   onPick,
 }: {
   node: FolderNode;
   depth: number;
   currentParent: number | null;
   disabledIds: Set<number>;
+  pathById: Map<number, string>;
   onPick: (id: number | null) => void;
 }) {
+  // Show parent path as a subtitle when the folder is nested (i.e. path has more than just its own name)
+  const fullPath = pathById.get(node.id) ?? node.name;
+  const parentPath =
+    fullPath !== node.name && fullPath.endsWith(node.name)
+      ? fullPath.slice(0, fullPath.length - node.name.length).replace(/\s*\/\s*$/, "")
+      : "";
   return (
     <>
       <FolderTreeItem
         label={node.name}
+        subtitle={parentPath || undefined}
         icon={<FolderIcon className="h-4 w-4" />}
         depth={depth}
         isCurrent={currentParent === node.id}
@@ -2062,6 +2411,7 @@ function FolderTreeBranch({
           depth={depth + 1}
           currentParent={currentParent}
           disabledIds={disabledIds}
+          pathById={pathById}
           onPick={onPick}
         />
       ))}
@@ -2071,6 +2421,7 @@ function FolderTreeBranch({
 
 function FolderTreeItem({
   label,
+  subtitle,
   icon,
   depth,
   isCurrent,
@@ -2079,6 +2430,7 @@ function FolderTreeItem({
   testId,
 }: {
   label: string;
+  subtitle?: string;
   icon: React.ReactNode;
   depth: number;
   isCurrent: boolean;
@@ -2096,10 +2448,15 @@ function FolderTreeItem({
       data-testid={testId}
       aria-current={isCurrent}
     >
-      <span className="text-muted-foreground">{icon}</span>
-      <span className="truncate flex-1">{label}</span>
+      <span className="text-muted-foreground shrink-0">{icon}</span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate">{label}</span>
+        {subtitle && (
+          <span className="block text-[11px] text-muted-foreground truncate">{subtitle}</span>
+        )}
+      </span>
       {isCurrent && (
-        <span className="text-xs text-muted-foreground">Current</span>
+        <span className="text-xs text-muted-foreground shrink-0">Current</span>
       )}
     </button>
   );

@@ -6,7 +6,7 @@ import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { z } from "zod";
-import type { Photo } from "@shared/schema";
+import type { Photo, Folder } from "@shared/schema";
 import {
   cloudinaryConfigured,
   uploadBufferToCloudinary,
@@ -207,6 +207,41 @@ export async function registerRoutes(
     const parentId = parseFolderId(req.query.parentId);
     const items = await storage.listFolders(parentId);
     res.json(items);
+  });
+
+  // List ALL folders with their full path (e.g. "HK / Trip / Day 1").
+  // Used by the move dialog and drag-and-drop to disambiguate folders with the same name.
+  app.get("/api/folders/all-with-paths", async (_req, res) => {
+    // Collect every folder by walking from root
+    const all: Folder[] = [];
+    const queue: (number | null)[] = [null];
+    const seen = new Set<string>();
+    while (queue.length) {
+      const pid = queue.shift()!;
+      const key = pid === null ? "root" : String(pid);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const list = await storage.listFolders(pid);
+      for (const f of list) {
+        all.push(f);
+        queue.push(f.id);
+      }
+    }
+    const byId = new Map<number, Folder>();
+    for (const f of all) byId.set(f.id, f);
+    const result = all.map((f) => {
+      const names: string[] = [];
+      let cur: Folder | undefined = f;
+      const guard = new Set<number>();
+      while (cur && !guard.has(cur.id)) {
+        guard.add(cur.id);
+        names.unshift(cur.name);
+        if (cur.parentId == null) break;
+        cur = byId.get(cur.parentId);
+      }
+      return { ...f, path: names.join(" / ") };
+    });
+    res.json(result);
   });
 
   // Get breadcrumb path for a folder
@@ -709,6 +744,93 @@ export async function registerRoutes(
       );
     }
     res.status(204).end();
+  });
+
+  // ---------- BULK MOVE ----------
+
+  // Move many items (photos / pairs / folders) into a destination folder in one call.
+  // Body: { photoIds?: number[], pairIds?: number[], folderIds?: number[], destFolderId: number | null }
+  const bulkMoveSchema = z.object({
+    photoIds: z.array(z.number().int().positive()).optional(),
+    pairIds: z.array(z.number().int().positive()).optional(),
+    folderIds: z.array(z.number().int().positive()).optional(),
+    destFolderId: z.union([z.number().int().positive(), z.null()]),
+  });
+
+  app.post("/api/bulk/move", async (req, res) => {
+    try {
+      const body = bulkMoveSchema.parse(req.body);
+      const dest = body.destFolderId;
+      if (dest !== null) {
+        const folder = await storage.getFolder(dest);
+        if (!folder) return res.status(400).json({ message: "Destination folder not found" });
+      }
+
+      // For folder moves, build the descendant set per folder to reject illegal moves.
+      const folderIds = body.folderIds ?? [];
+      if (folderIds.length > 0 && dest !== null) {
+        // Build parent->children map once
+        const all: Folder[] = [];
+        const queue: (number | null)[] = [null];
+        const seen = new Set<string>();
+        while (queue.length) {
+          const pid = queue.shift()!;
+          const key = pid === null ? "root" : String(pid);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const list = await storage.listFolders(pid);
+          for (const f of list) {
+            all.push(f);
+            queue.push(f.id);
+          }
+        }
+        const childrenByParent = new Map<number, Folder[]>();
+        for (const f of all) {
+          const key = (f.parentId ?? -1) as number;
+          if (key === -1) continue;
+          if (!childrenByParent.has(key)) childrenByParent.set(key, []);
+          childrenByParent.get(key)!.push(f);
+        }
+        for (const fid of folderIds) {
+          if (fid === dest) {
+            return res.status(400).json({ message: "Cannot move a folder into itself" });
+          }
+          // Walk descendants of fid; if dest appears, reject.
+          const stack: number[] = [fid];
+          const visited = new Set<number>();
+          while (stack.length) {
+            const cur = stack.pop()!;
+            if (visited.has(cur)) continue;
+            visited.add(cur);
+            const kids = childrenByParent.get(cur) || [];
+            for (const k of kids) {
+              if (k.id === dest) {
+                return res.status(400).json({ message: "Cannot move a folder into one of its own subfolders" });
+              }
+              stack.push(k.id);
+            }
+          }
+        }
+      }
+
+      let moved = 0;
+      for (const pid of body.photoIds ?? []) {
+        const r = await storage.movePhoto(pid, dest);
+        if (r) moved++;
+      }
+      for (const pairId of body.pairIds ?? []) {
+        const r = await storage.movePair(pairId, dest);
+        if (r) moved++;
+      }
+      for (const fid of folderIds) {
+        const r = await storage.moveFolder(fid, dest);
+        if (r) moved++;
+      }
+      res.json({ moved });
+    } catch (err: any) {
+      const msg = err?.errors?.[0]?.message || err?.message || "Bad request";
+      res.status(400).json({ message: msg });
+    }
   });
 
   return httpServer;

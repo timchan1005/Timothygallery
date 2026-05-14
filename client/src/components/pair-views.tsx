@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { photoUrl, photoThumbUrl } from "@/lib/queryClient";
 import type { PairWithPhotos } from "@shared/schema";
-import { Columns2, ArrowLeftRight, X, Trash2, Pencil, ChevronLeft, ChevronRight, FolderInput, Play } from "lucide-react";
+import { Columns2, ArrowLeftRight, X, Trash2, Pencil, ChevronLeft, ChevronRight, FolderInput, Play, Check } from "lucide-react";
 
 function VideoPlayBadge({ size = "md" }: { size?: "sm" | "md" }) {
   const cls =
@@ -60,23 +60,48 @@ export function PairCard({
   onRename,
   onMove,
   onDelete,
+  draggable = false,
+  onDragStart,
+  selectMode = false,
+  isSelected = false,
+  onToggleSelect,
 }: {
   pair: PairWithPhotos;
   onOpen: () => void;
   onRename: () => void;
   onMove: () => void;
   onDelete: () => void;
+  draggable?: boolean;
+  onDragStart?: (e: React.DragEvent<HTMLDivElement>) => void;
+  selectMode?: boolean;
+  isSelected?: boolean;
+  onToggleSelect?: () => void;
 }) {
   return (
     <div
-      className="group relative aspect-square"
+      className={`group relative aspect-square ${isSelected ? "ring-2 ring-primary rounded-lg" : ""}`}
       data-testid={`pair-card-${pair.id}`}
+      draggable={draggable}
+      onDragStart={onDragStart}
     >
+      {selectMode && (
+        <div
+          className={`absolute top-2 left-2 z-20 h-5 w-5 rounded border-2 flex items-center justify-center transition-colors ${
+            isSelected
+              ? "bg-primary border-primary text-primary-foreground"
+              : "bg-background/80 border-muted-foreground backdrop-blur-sm"
+          }`}
+          aria-hidden="true"
+          data-testid={`checkbox-pair-${pair.id}`}
+        >
+          {isSelected && <Check className="h-3 w-3" />}
+        </div>
+      )}
       <button
         type="button"
-        onClick={onOpen}
+        onClick={selectMode ? onToggleSelect : onOpen}
         className="absolute inset-0 w-full h-full focus:outline-none rounded-lg"
-        aria-label={`Open pair${pair.name ? ` ${pair.name}` : ""}`}
+        aria-label={selectMode ? `Toggle selection of pair${pair.name ? ` ${pair.name}` : ""}` : `Open pair${pair.name ? ` ${pair.name}` : ""}`}
         data-testid={`button-open-pair-${pair.id}`}
       >
         {/* Back card (right photo) — offset & rotated to peek out from behind */}
