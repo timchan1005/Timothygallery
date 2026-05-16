@@ -189,6 +189,22 @@ type DocumentWithUrls = DocumentRecord & {
   downloadUrl?: string;
 };
 
+/**
+ * Build the in-app viewer URL for a document (inline streaming through the auth proxy).
+ * The server returns relative paths like "/api/documents/123/raw"; we prepend `API_BASE`
+ * for deployment proxy support and wrap with `?t=<token>` so pdf.js / fetch can authenticate.
+ */
+function docMediaUrl(doc: DocumentWithUrls): string {
+  if (doc.url) return withToken(`${API_BASE}${doc.url}`);
+  return withToken(`${API_BASE}/api/documents/${doc.id}/raw`);
+}
+
+/** Build the download URL (forces save dialog server-side via Content-Disposition: attachment). */
+function docDownloadUrl(doc: DocumentWithUrls): string {
+  if (doc.downloadUrl) return withToken(`${API_BASE}${doc.downloadUrl}`);
+  return withToken(`${API_BASE}/api/documents/${doc.id}/download`);
+}
+
 function docIconFor(docType: DocumentRecord["docType"]) {
   switch (docType) {
     case "pdf":
@@ -1428,7 +1444,13 @@ export default function Gallery() {
                   <DocumentCard
                     key={doc.id}
                     doc={doc}
-                    onOpen={() => setSelectedDocument(doc as DocumentLite)}
+                    onOpen={() =>
+                      setSelectedDocument({
+                        ...(doc as DocumentLite),
+                        url: docMediaUrl(doc),
+                        downloadUrl: docDownloadUrl(doc),
+                      })
+                    }
                     onRename={() => setRenameDocumentTarget(doc)}
                     onMove={() => setMoveTarget({ type: "document", document: doc })}
                     onDelete={() => setPendingDeleteDocument(doc)}
@@ -2841,14 +2863,12 @@ function DocumentCard({
               <FileText className="h-4 w-4 mr-2" />
               Open
             </DropdownMenuItem>
-            {doc.downloadUrl && (
-              <DropdownMenuItem asChild data-testid={`menu-doc-download-${doc.id}`}>
-                <a href={doc.downloadUrl} target="_self" rel="noopener">
-                  <Download className="h-4 w-4 mr-2" />
-                  Download
-                </a>
-              </DropdownMenuItem>
-            )}
+            <DropdownMenuItem asChild data-testid={`menu-doc-download-${doc.id}`}>
+              <a href={docDownloadUrl(doc)} target="_self" rel="noopener">
+                <Download className="h-4 w-4 mr-2" />
+                Download
+              </a>
+            </DropdownMenuItem>
             <DropdownMenuItem onClick={onRename} data-testid={`menu-doc-rename-${doc.id}`}>
               <Pencil className="h-4 w-4 mr-2" />
               Rename

@@ -150,9 +150,13 @@ export async function deleteCloudinaryAsset(
 }
 
 /**
- * Build a signed, short-lived URL to fetch a raw asset (e.g. PDF/DOCX/XLSX).
- * Raw delivery URLs work without signing on most accounts, but signing future-proofs
- * against restricted-media settings.
+ * Build a delivery URL for a raw asset (PDF/DOCX/XLSX) intended for SERVER use only.
+ *
+ * NOTE: Most Cloudinary accounts block direct browser delivery of PDF/raw assets via
+ * the default "Restricted media types" security setting (Settings → Security in the
+ * Cloudinary dashboard). This URL returns 401 when fetched from a browser. The server
+ * uses `cloudinaryPrivateDownloadUrl` instead for actual delivery, then proxies the
+ * stream to authenticated clients via /api/documents/:id/raw.
  */
 export function cloudinaryRawUrl(
   publicId: string,
@@ -171,6 +175,57 @@ export function cloudinaryRawUrl(
       : "attachment";
   }
   return cloudinary.url(publicId, opts);
+}
+
+/**
+ * Build a signed, short-lived (1 hour) Admin API download URL for a raw asset.
+ * This URL works regardless of the "Restricted media types" setting because it
+ * authenticates with the api_key/signature query params — the server uses it to
+ * fetch the binary on behalf of the authenticated user.
+ *
+ * @param publicId  Full Cloudinary public_id (including extension, e.g. "folder/file.pdf")
+ * @param format    File extension WITHOUT the dot (e.g. "pdf", "docx", "xlsx")
+ */
+export function cloudinaryPrivateDownloadUrl(
+  publicId: string,
+  format: string
+): string {
+  if (!cloudinaryConfigured) return "";
+  return cloudinary.utils.private_download_url(publicId, format, {
+    resource_type: "raw",
+    type: "upload",
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
+  });
+}
+
+/**
+ * Stream a raw asset's bytes through a Node Readable. Uses the signed Admin API
+ * download URL under the hood, so it bypasses Cloudinary's restricted-media block.
+ * Caller is responsible for piping `stream` to the Express response and forwarding
+ * `status` / `headers` (or constructing its own).
+ */
+export async function fetchCloudinaryRaw(
+  publicId: string,
+  format: string
+): Promise<{
+  stream: NodeJS.ReadableStream;
+  status: number;
+  headers: Record<string, string | string[] | undefined>;
+}> {
+  const url = cloudinaryPrivateDownloadUrl(publicId, format);
+  if (!url) throw new Error("Cloudinary is not configured");
+  const https = await import("node:https");
+  return new Promise((resolve, reject) => {
+    https
+      .get(url, (res) => {
+        resolve({
+          stream: res,
+          status: res.statusCode ?? 0,
+          headers: res.headers,
+        });
+      })
+      .on("error", reject);
+  });
 }
 
 /**

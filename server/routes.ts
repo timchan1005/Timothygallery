@@ -15,6 +15,7 @@ import {
   cloudinaryDeliveryUrl,
   cloudinaryVideoPosterUrl,
   cloudinaryRawUrl,
+  fetchCloudinaryRaw,
   signUpload,
   type CldResourceType,
 } from "./cloudinary";
@@ -156,8 +157,9 @@ function issueToken(): string {
 
 function requireAuth(req: Request, res: Response, next: () => void) {
   // Mounted at /api, so req.path here lacks the /api prefix.
-  // Allow /photos/:id/raw and /download with token in query string (for <img src> / <a download>).
-  if (/^\/?photos\/\d+\/(raw|download)$/.test(req.path)) {
+  // Allow /photos/:id/raw|download AND /documents/:id/raw|download with token in query
+  // string (so <img src>, <a download>, and pdf.js fetch can authenticate via URL only).
+  if (/^\/?(photos|documents)\/\d+\/(raw|download)$/.test(req.path)) {
     const qt = typeof req.query.t === "string" ? req.query.t : "";
     if (activeTokens.has(qt)) return next();
   }
@@ -579,15 +581,95 @@ export async function registerRoutes(
     return "other";
   }
 
-  // Decorate a document with its URLs before sending to the client
+  // Decorate a document with its URLs before sending to the client.
+  // We return SERVER PROXY paths (not direct Cloudinary URLs) because Cloudinary's
+  // default "Restricted media types" setting blocks direct browser delivery of PDF/raw
+  // assets. The proxy endpoints below stream the bytes through using authenticated
+  // Admin-API download URLs. Client wraps these with `?t=<token>` via `withToken()`.
   function withDocUrls(doc: DocumentRecord) {
     if (!doc.cloudinaryPublicId) return doc;
     return {
       ...doc,
-      url: cloudinaryRawUrl(doc.cloudinaryPublicId),
-      downloadUrl: cloudinaryRawUrl(doc.cloudinaryPublicId, { filename: doc.originalName }),
+      url: `/api/documents/${doc.id}/raw`,
+      downloadUrl: `/api/documents/${doc.id}/download`,
     };
   }
+
+  // Map docType to file extension for Cloudinary's private_download_url helper.
+  function docTypeToFormat(docType: string, originalName: string): string {
+    const dot = originalName.lastIndexOf(".");
+    if (dot >= 0) return originalName.slice(dot + 1).toLowerCase();
+    return docType.toLowerCase();
+  }
+
+  // Map docType to a Content-Type for the proxy response.
+  function docTypeToMime(docType: string): string {
+    switch (docType) {
+      case "pdf": return "application/pdf";
+      case "docx": return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+      case "docm": return "application/vnd.ms-word.document.macroEnabled.12";
+      case "xlsx": return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+      case "xlsm": return "application/vnd.ms-excel.sheet.macroEnabled.12";
+      default: return "application/octet-stream";
+    }
+  }
+
+  // Stream a document's bytes from Cloudinary to the client.
+  // Shared by /raw (inline) and /download (attachment).
+  async function streamDocument(
+    req: Request,
+    res: Response,
+    disposition: "inline" | "attachment"
+  ) {
+    const id = parseInt(req.params.id, 10);
+    if (Number.isNaN(id)) {
+      return res.status(400).json({ message: "Bad id" });
+    }
+    const doc = await storage.getDocument(id);
+    if (!doc || !doc.cloudinaryPublicId) {
+      return res.status(404).json({ message: "Not found" });
+    }
+    const format = docTypeToFormat(doc.docType, doc.originalName);
+    try {
+      const { stream, status, headers } = await fetchCloudinaryRaw(doc.cloudinaryPublicId, format);
+      if (status < 200 || status >= 300) {
+        // Drain the upstream error body and surface it.
+        let body = "";
+        stream.on("data", (c: Buffer) => { body += c.toString(); });
+        stream.on("end", () => {
+          console.error("[documents] Cloudinary returned", status, body.slice(0, 200));
+          res.status(502).json({ message: "Failed to fetch document from storage" });
+        });
+        return;
+      }
+      // Forward useful headers; set our own Content-Type and Content-Disposition.
+      const len = headers["content-length"];
+      if (len) res.setHeader("Content-Length", Array.isArray(len) ? len[0] : len);
+      res.setHeader("Content-Type", docTypeToMime(doc.docType));
+      res.setHeader("Cache-Control", "private, max-age=300");
+      const safeName = doc.originalName.replace(/["\\]/g, "_");
+      const dispoValue =
+        disposition === "attachment"
+          ? `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(doc.originalName)}`
+          : `inline; filename="${safeName}"`;
+      res.setHeader("Content-Disposition", dispoValue);
+      stream.pipe(res);
+      stream.on("error", (err) => {
+        console.error("[documents] stream error", err);
+        if (!res.headersSent) res.status(502).end();
+        else res.end();
+      });
+    } catch (err: any) {
+      console.error("[documents] fetch error", err);
+      res.status(502).json({ message: err?.message || "Failed to fetch document" });
+    }
+  }
+
+  // Inline streaming (used by the in-app PDF/DOCX/XLSX viewer).
+  app.get("/api/documents/:id/raw", (req, res) => streamDocument(req, res, "inline"));
+
+  // Download streaming (used by the "Download" button — forces save dialog).
+  app.get("/api/documents/:id/download", (req, res) => streamDocument(req, res, "attachment"));
 
   // List documents in a folder (root if not provided)
   app.get("/api/documents", async (req, res) => {
