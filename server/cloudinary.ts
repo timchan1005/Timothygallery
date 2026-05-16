@@ -29,7 +29,7 @@ export interface CloudinaryUploadResult {
   duration?: number | null;
 }
 
-export type CldResourceType = "image" | "video";
+export type CldResourceType = "image" | "video" | "raw";
 
 /**
  * Build a signed upload payload for browser → Cloudinary direct uploads.
@@ -147,6 +147,30 @@ export async function deleteCloudinaryAsset(
   } catch (err) {
     console.warn("[cloudinary] failed to delete", publicId, err);
   }
+}
+
+/**
+ * Build a signed, short-lived URL to fetch a raw asset (e.g. PDF/DOCX/XLSX).
+ * Raw delivery URLs work without signing on most accounts, but signing future-proofs
+ * against restricted-media settings.
+ */
+export function cloudinaryRawUrl(
+  publicId: string,
+  attachment?: { filename?: string }
+): string {
+  if (!cloudinaryConfigured) return "";
+  const opts: any = {
+    secure: true,
+    resource_type: "raw",
+    sign_url: false,
+  };
+  if (attachment) {
+    // fl_attachment forces the browser to download with the given filename.
+    opts.flags = attachment.filename
+      ? `attachment:${encodeURIComponent(attachment.filename)}`
+      : "attachment";
+  }
+  return cloudinary.url(publicId, opts);
 }
 
 /**

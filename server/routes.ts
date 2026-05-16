@@ -6,7 +6,7 @@ import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { z } from "zod";
-import type { Photo, Folder } from "@shared/schema";
+import type { Photo, Folder, Document as DocumentRecord } from "@shared/schema";
 import {
   cloudinaryConfigured,
   uploadBufferToCloudinary,
@@ -14,6 +14,7 @@ import {
   deleteCloudinaryAsset,
   cloudinaryDeliveryUrl,
   cloudinaryVideoPosterUrl,
+  cloudinaryRawUrl,
   signUpload,
   type CldResourceType,
 } from "./cloudinary";
@@ -325,10 +326,13 @@ export async function registerRoutes(
     const { photoFilenames, cloudinaryAssets } = await storage.deleteFolderRecursive(id);
     for (const fn of photoFilenames) unlinkSafe(fn);
     for (const asset of cloudinaryAssets) {
-      await deleteCloudinaryAsset(
-        asset.publicId,
-        asset.resourceType === "video" ? "video" : "image"
-      );
+      const rt =
+        asset.resourceType === "video"
+          ? "video"
+          : asset.resourceType === "raw"
+            ? "raw"
+            : "image";
+      await deleteCloudinaryAsset(asset.publicId, rt);
     }
     res.status(204).end();
   });
@@ -500,7 +504,7 @@ export async function registerRoutes(
   // Returns a short-lived signature so the browser can POST directly to Cloudinary.
   // Body: { resourceType: "image" | "video" }
   const signSchema = z.object({
-    resourceType: z.enum(["image", "video"]),
+    resourceType: z.enum(["image", "video", "raw"]),
   });
 
   app.post("/api/cloudinary/sign", (req, res) => {
@@ -560,6 +564,132 @@ export async function registerRoutes(
       const msg = err?.errors?.[0]?.message || err?.message || "Bad request";
       res.status(400).json({ message: msg });
     }
+  });
+
+  // ---------- DOCUMENTS ----------
+
+  // Map filename / mime to a doc_type tag
+  function detectDocType(name: string, mime: string): "pdf" | "docx" | "docm" | "xlsx" | "xlsm" | "other" {
+    const lower = name.toLowerCase();
+    if (lower.endsWith(".pdf") || mime === "application/pdf") return "pdf";
+    if (lower.endsWith(".docx")) return "docx";
+    if (lower.endsWith(".docm")) return "docm";
+    if (lower.endsWith(".xlsx")) return "xlsx";
+    if (lower.endsWith(".xlsm")) return "xlsm";
+    return "other";
+  }
+
+  // Decorate a document with its URLs before sending to the client
+  function withDocUrls(doc: DocumentRecord) {
+    if (!doc.cloudinaryPublicId) return doc;
+    return {
+      ...doc,
+      url: cloudinaryRawUrl(doc.cloudinaryPublicId),
+      downloadUrl: cloudinaryRawUrl(doc.cloudinaryPublicId, { filename: doc.originalName }),
+    };
+  }
+
+  // List documents in a folder (root if not provided)
+  app.get("/api/documents", async (req, res) => {
+    const folderId = parseFolderId(req.query.folderId);
+    const docs = await storage.listDocuments(folderId);
+    res.json(docs.map(withDocUrls));
+  });
+
+  // Get one document
+  app.get("/api/documents/:id", async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "Bad id" });
+    const doc = await storage.getDocument(id);
+    if (!doc) return res.status(404).json({ message: "Not found" });
+    res.json(withDocUrls(doc));
+  });
+
+  // Register a document after a successful direct upload to Cloudinary
+  const registerDocSchema = z.object({
+    cloudinaryPublicId: z.string().min(1),
+    originalName: z.string().min(1).max(300),
+    mimeType: z.string().min(1).max(160),
+    size: z.number().int().nonnegative(),
+    folderId: z.union([z.number().int().positive(), z.null()]).optional(),
+    pageCount: z.number().int().positive().optional().nullable(),
+  });
+
+  app.post("/api/documents/register", async (req, res) => {
+    try {
+      const body = registerDocSchema.parse(req.body);
+      const folderId = body.folderId ?? null;
+      if (folderId !== null) {
+        const exists = await storage.getFolder(folderId);
+        if (!exists) return res.status(400).json({ message: "Target folder not found" });
+      }
+      const docType = detectDocType(body.originalName, body.mimeType);
+      // Reject anything that isn't one of the allowed types
+      if (docType === "other") {
+        return res.status(400).json({
+          message: "Only PDF, DOCX, DOCM, XLSX, and XLSM files are supported",
+        });
+      }
+      const doc = await storage.createDocument({
+        filename: `cloudinary:${body.cloudinaryPublicId}`,
+        originalName: body.originalName,
+        mimeType: body.mimeType,
+        size: body.size,
+        uploadedAt: Date.now(),
+        folderId,
+        cloudinaryPublicId: body.cloudinaryPublicId,
+        docType,
+        pageCount: body.pageCount ?? null,
+      });
+      res.status(201).json(withDocUrls(doc));
+    } catch (err: any) {
+      const msg = err?.errors?.[0]?.message || err?.message || "Bad request";
+      res.status(400).json({ message: msg });
+    }
+  });
+
+  // Rename a document
+  const renameDocSchema = z.object({
+    originalName: z.string().trim().min(1).max(300),
+  });
+  app.patch("/api/documents/:id", async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "Bad id" });
+    try {
+      // Allow either rename or move
+      if ("folderId" in req.body) {
+        const folderId =
+          req.body.folderId === null ? null : parseFolderId(req.body.folderId);
+        if (folderId !== null) {
+          const exists = await storage.getFolder(folderId);
+          if (!exists) return res.status(400).json({ message: "Target folder not found" });
+        }
+        const updated = await storage.moveDocument(id, folderId);
+        if (!updated) return res.status(404).json({ message: "Not found" });
+        return res.json(withDocUrls(updated));
+      }
+      const body = renameDocSchema.parse(req.body);
+      const updated = await storage.renameDocument(id, body.originalName);
+      if (!updated) return res.status(404).json({ message: "Not found" });
+      res.json(withDocUrls(updated));
+    } catch (err: any) {
+      const msg = err?.errors?.[0]?.message || err?.message || "Bad request";
+      res.status(400).json({ message: msg });
+    }
+  });
+
+  // Delete a document (also removes the Cloudinary asset)
+  app.delete("/api/documents/:id", async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "Bad id" });
+    const removed = await storage.deleteDocument(id);
+    if (!removed) return res.status(404).json({ message: "Not found" });
+    if (removed.cloudinaryPublicId) {
+      await deleteCloudinaryAsset(removed.cloudinaryPublicId, "raw");
+    } else if (removed.filename && !removed.filename.startsWith("cloudinary:")) {
+      unlinkSafe(removed.filename);
+    }
+    res.status(204).end();
   });
 
   // ---------- PAIRS ----------
@@ -754,6 +884,7 @@ export async function registerRoutes(
     photoIds: z.array(z.number().int().positive()).optional(),
     pairIds: z.array(z.number().int().positive()).optional(),
     folderIds: z.array(z.number().int().positive()).optional(),
+    documentIds: z.array(z.number().int().positive()).optional(),
     destFolderId: z.union([z.number().int().positive(), z.null()]),
   });
 
@@ -824,6 +955,10 @@ export async function registerRoutes(
       }
       for (const fid of folderIds) {
         const r = await storage.moveFolder(fid, dest);
+        if (r) moved++;
+      }
+      for (const did of body.documentIds ?? []) {
+        const r = await storage.moveDocument(did, dest);
         if (r) moved++;
       }
       res.json({ moved });

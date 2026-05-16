@@ -313,3 +313,52 @@
     inset: -1px;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/*  Document preview styles                                            */
+/* ------------------------------------------------------------------ */
+
+/* DOCX content rendered by mammoth */
+.docx-preview p { margin: 0 0 0.75em 0; line-height: 1.6; }
+.docx-preview h1, .docx-preview h2, .docx-preview h3,
+.docx-preview h4, .docx-preview h5, .docx-preview h6 {
+  font-weight: 600;
+  margin: 1.25em 0 0.5em;
+  line-height: 1.3;
+}
+.docx-preview h1 { font-size: 1.5rem; }
+.docx-preview h2 { font-size: 1.25rem; }
+.docx-preview h3 { font-size: 1.125rem; }
+.docx-preview ul, .docx-preview ol { padding-left: 1.5em; margin: 0 0 0.75em 0; }
+.docx-preview li { margin-bottom: 0.25em; }
+.docx-preview table { border-collapse: collapse; margin: 0.75em 0; }
+.docx-preview table td, .docx-preview table th {
+  border: 1px solid hsl(var(--border));
+  padding: 4px 8px;
+}
+.docx-preview img { max-width: 100%; height: auto; }
+.docx-preview a { color: hsl(var(--primary)); text-decoration: underline; }
+
+/* XLSX content rendered by SheetJS sheet_to_html */
+.xlsx-preview table {
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.xlsx-preview table td, .xlsx-preview table th {
+  border: 1px solid hsl(var(--border));
+  padding: 4px 8px;
+  white-space: nowrap;
+  min-width: 60px;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.xlsx-preview table tr:nth-child(even) td { background-color: hsl(var(--muted) / 0.4); }
+.xlsx-preview table tr:first-child td {
+  font-weight: 600;
+  background-color: hsl(var(--muted));
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}

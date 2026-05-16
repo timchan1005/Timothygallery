@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiRequest, queryClient, API_BASE, withToken, setAuthToken, getAuthToken, subscribeAuthToken, photoUrl, photoThumbUrl, photoDownloadUrl } from "@/lib/queryClient";
-import { uploadFilesDirect } from "@/lib/cloudinaryUpload";
-import type { Folder, Photo, PairWithPhotos } from "@shared/schema";
+import {
+  uploadFilesDirect,
+  uploadDocumentsDirect,
+  isDocumentFile,
+  SUPPORTED_DOCUMENT_EXTENSIONS,
+} from "@/lib/cloudinaryUpload";
+import type { Folder, Photo, PairWithPhotos, Document as DocumentRecord } from "@shared/schema";
 import { PairCard, PairLightbox } from "@/components/pair-views";
+import { DocumentViewer, type DocumentLite } from "@/components/document-viewer";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -35,6 +41,10 @@ import {
   Grid3x3,
   List as ListIcon,
   Play,
+  FileText,
+  FileSpreadsheet,
+  FileType2,
+  File as FileIcon,
 } from "lucide-react";
 import {
   AlertDialog,
@@ -172,6 +182,45 @@ function Logo() {
   );
 }
 
+// ---------- document types & icons ----------
+
+type DocumentWithUrls = DocumentRecord & {
+  url?: string;
+  downloadUrl?: string;
+};
+
+function docIconFor(docType: DocumentRecord["docType"]) {
+  switch (docType) {
+    case "pdf":
+      return FileText;
+    case "docx":
+    case "docm":
+      return FileType2;
+    case "xlsx":
+    case "xlsm":
+      return FileSpreadsheet;
+    default:
+      return FileIcon;
+  }
+}
+
+function docTypeLabel(d: DocumentRecord): string {
+  switch (d.docType) {
+    case "pdf":
+      return "PDF";
+    case "docx":
+      return "Word";
+    case "docm":
+      return "Word · macros";
+    case "xlsx":
+      return "Excel";
+    case "xlsm":
+      return "Excel · macros";
+    default:
+      return "Document";
+  }
+}
+
 // ---------- main component ----------
 
 export default function Gallery() {
@@ -183,6 +232,11 @@ export default function Gallery() {
   const [isDragging, setIsDragging] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
+
+  // Document viewer state
+  const [selectedDocument, setSelectedDocument] = useState<DocumentLite | null>(null);
+  const [pendingDeleteDocument, setPendingDeleteDocument] = useState<DocumentWithUrls | null>(null);
+  const [renameDocumentTarget, setRenameDocumentTarget] = useState<DocumentWithUrls | null>(null);
 
   // Pair feature state
   const pairFileInputRef = useRef<HTMLInputElement>(null);
@@ -202,7 +256,15 @@ export default function Gallery() {
     | { type: "photo"; photo: Photo }
     | { type: "folder"; folder: Folder }
     | { type: "pair"; pair: PairWithPhotos }
-    | { type: "bulk"; photoIds: number[]; pairIds: number[]; folderIds: number[]; label: string }
+    | { type: "document"; document: DocumentWithUrls }
+    | {
+        type: "bulk";
+        photoIds: number[];
+        pairIds: number[];
+        folderIds: number[];
+        documentIds: number[];
+        label: string;
+      }
     | null
   >(null);
 
@@ -211,12 +273,14 @@ export default function Gallery() {
   const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<number>>(new Set());
   const [selectedPairIds, setSelectedPairIds] = useState<Set<number>>(new Set());
   const [selectedFolderIds, setSelectedFolderIds] = useState<Set<number>>(new Set());
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<Set<number>>(new Set());
   const selectionCount =
-    selectedPhotoIds.size + selectedPairIds.size + selectedFolderIds.size;
+    selectedPhotoIds.size + selectedPairIds.size + selectedFolderIds.size + selectedDocumentIds.size;
   const clearSelection = useCallback(() => {
     setSelectedPhotoIds(new Set());
     setSelectedPairIds(new Set());
     setSelectedFolderIds(new Set());
+    setSelectedDocumentIds(new Set());
   }, []);
   const togglePhotoSel = useCallback((id: number) => {
     setSelectedPhotoIds((prev) => {
@@ -236,6 +300,14 @@ export default function Gallery() {
   }, []);
   const toggleFolderSel = useCallback((id: number) => {
     setSelectedFolderIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const toggleDocumentSel = useCallback((id: number) => {
+    setSelectedDocumentIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -289,6 +361,19 @@ export default function Gallery() {
     },
   });
 
+  const documentKey = ["/api/documents", { folderId: currentFolderId ?? "root" }];
+  const { data: documents = [], isLoading: documentsLoading } = useQuery<DocumentWithUrls[]>({
+    queryKey: documentKey,
+    queryFn: async () => {
+      const url =
+        currentFolderId === null
+          ? "/api/documents"
+          : `/api/documents?folderId=${currentFolderId}`;
+      const r = await apiRequest("GET", url);
+      return r.json();
+    },
+  });
+
   // Breadcrumb path for current folder
   const { data: breadcrumb = [] } = useQuery<Folder[]>({
     queryKey: ["/api/folders/path", currentFolderId],
@@ -306,21 +391,40 @@ export default function Gallery() {
 
   const uploadMutation = useMutation({
     mutationFn: async (files: FileList | File[]) => {
-      const arr = Array.from(files).filter(isLikelyMedia);
-      if (arr.length === 0) throw new Error("No image or video files selected");
+      const all = Array.from(files);
+      const mediaFiles = all.filter(isLikelyMedia);
+      const docFiles = all.filter(isDocumentFile);
+      if (mediaFiles.length === 0 && docFiles.length === 0) {
+        throw new Error("Unsupported file types");
+      }
       setUploadProgress(0);
-      const created = await uploadFilesDirect(arr, {
-        folderId: currentFolderId,
-        onProgress: (frac) => setUploadProgress(frac),
-      });
-      return created;
+      const total = mediaFiles.length + docFiles.length;
+      let createdPhotos: Awaited<ReturnType<typeof uploadFilesDirect>> = [];
+      let createdDocs: Awaited<ReturnType<typeof uploadDocumentsDirect>> = [];
+      const weightMedia = mediaFiles.length / Math.max(1, total);
+      if (mediaFiles.length > 0) {
+        createdPhotos = await uploadFilesDirect(mediaFiles, {
+          folderId: currentFolderId,
+          onProgress: (frac) => setUploadProgress(frac * weightMedia),
+        });
+      }
+      if (docFiles.length > 0) {
+        createdDocs = await uploadDocumentsDirect(docFiles, {
+          folderId: currentFolderId,
+          onProgress: (frac) =>
+            setUploadProgress(weightMedia + frac * (1 - weightMedia)),
+        });
+      }
+      return { photos: createdPhotos, docs: createdDocs };
     },
-    onSuccess: (created) => {
+    onSuccess: ({ photos, docs }) => {
       setUploadProgress(null);
-      queryClient.invalidateQueries({ queryKey: ["/api/photos"] });
-      toast({
-        title: `Uploaded ${created.length} ${created.length === 1 ? "item" : "items"}`,
-      });
+      if (photos.length > 0) queryClient.invalidateQueries({ queryKey: ["/api/photos"] });
+      if (docs.length > 0) queryClient.invalidateQueries({ queryKey: ["/api/documents"] });
+      const parts: string[] = [];
+      if (photos.length > 0) parts.push(`${photos.length} ${photos.length === 1 ? "photo" : "photos"}`);
+      if (docs.length > 0) parts.push(`${docs.length} ${docs.length === 1 ? "document" : "documents"}`);
+      toast({ title: `Uploaded ${parts.join(" + ")}` });
     },
     onError: (err: Error) => {
       setUploadProgress(null);
@@ -432,6 +536,7 @@ export default function Gallery() {
       photoIds?: number[];
       pairIds?: number[];
       folderIds?: number[];
+      documentIds?: number[];
       destFolderId: number | null;
     }) => {
       const res = await apiRequest("POST", "/api/bulk/move", input);
@@ -443,6 +548,7 @@ export default function Gallery() {
       queryClient.invalidateQueries({ queryKey: ["/api/folders"] });
       queryClient.invalidateQueries({ queryKey: ["/api/folders/all-with-paths"] });
       queryClient.invalidateQueries({ queryKey: ["/api/folders/path"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/documents"] });
       setMoveTarget(null);
       clearSelection();
       toast({ title: moved === 1 ? "Moved 1 item" : `Moved ${moved} items` });
@@ -548,6 +654,52 @@ export default function Gallery() {
     },
   });
 
+  // ---- Document mutations ----
+  const moveDocumentMutation = useMutation({
+    mutationFn: async ({ id, folderId }: { id: number; folderId: number | null }) => {
+      const res = await apiRequest("PATCH", `/api/documents/${id}`, { folderId });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/documents"] });
+      setMoveTarget(null);
+      toast({ title: "Document moved" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Move failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const renameDocumentMutation = useMutation({
+    mutationFn: async ({ id, originalName }: { id: number; originalName: string }) => {
+      const res = await apiRequest("PATCH", `/api/documents/${id}`, { originalName });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/documents"] });
+      setRenameDocumentTarget(null);
+      toast({ title: "Document renamed" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Rename failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const deleteDocumentMutation = useMutation({
+    mutationFn: async (id: number) => {
+      await apiRequest("DELETE", `/api/documents/${id}`);
+      return id;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/documents"] });
+      setSelectedDocument(null);
+      toast({ title: "Document deleted" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   // ---------- drag-drop on whole window ----------
 
   useEffect(() => {
@@ -595,31 +747,38 @@ export default function Gallery() {
     photoIds: number[];
     pairIds: number[];
     folderIds: number[];
+    documentIds: number[];
   };
 
   // Build a payload from either current selection or a single dragged item.
-  const payloadFromDrag = (kind: "photo" | "pair" | "folder", id: number): DndPayload => {
+  const payloadFromDrag = (
+    kind: "photo" | "pair" | "folder" | "document",
+    id: number
+  ): DndPayload => {
     const inSel =
       (kind === "photo" && selectedPhotoIds.has(id)) ||
       (kind === "pair" && selectedPairIds.has(id)) ||
-      (kind === "folder" && selectedFolderIds.has(id));
+      (kind === "folder" && selectedFolderIds.has(id)) ||
+      (kind === "document" && selectedDocumentIds.has(id));
     if (inSel && selectionCount > 1) {
       return {
         photoIds: Array.from(selectedPhotoIds),
         pairIds: Array.from(selectedPairIds),
         folderIds: Array.from(selectedFolderIds),
+        documentIds: Array.from(selectedDocumentIds),
       };
     }
     return {
       photoIds: kind === "photo" ? [id] : [],
       pairIds: kind === "pair" ? [id] : [],
       folderIds: kind === "folder" ? [id] : [],
+      documentIds: kind === "document" ? [id] : [],
     };
   };
 
   const handleItemDragStart = (
     e: React.DragEvent,
-    kind: "photo" | "pair" | "folder",
+    kind: "photo" | "pair" | "folder" | "document",
     id: number
   ) => {
     const payload = payloadFromDrag(kind, id);
@@ -667,6 +826,7 @@ export default function Gallery() {
       photoIds: payload.photoIds,
       pairIds: payload.pairIds,
       folderIds: payload.folderIds,
+      documentIds: payload.documentIds || [],
       destFolderId,
     });
   };
@@ -696,6 +856,11 @@ export default function Gallery() {
     });
   }, [pairs, q]);
 
+  const filteredDocuments = useMemo(() => {
+    if (!q) return documents;
+    return documents.filter((d) => d.originalName.toLowerCase().includes(q));
+  }, [documents, q]);
+
   const selectedPhoto =
     selectedIdx !== null && selectedIdx >= 0 && selectedIdx < filteredPhotos.length
       ? filteredPhotos[selectedIdx]
@@ -721,16 +886,27 @@ export default function Gallery() {
     fileInputRef.current?.click();
   }, []);
 
-  const isLoading = foldersLoading || photosLoading || pairsLoading;
+  const isLoading = foldersLoading || photosLoading || pairsLoading || documentsLoading;
   const isEmpty =
     !isLoading &&
     filteredFolders.length === 0 &&
     filteredPhotos.length === 0 &&
-    filteredPairs.length === 0;
+    filteredPairs.length === 0 &&
+    filteredDocuments.length === 0;
   const isEmptyNoSearch =
-    isEmpty && !q && folders.length === 0 && photos.length === 0 && pairs.length === 0;
+    isEmpty &&
+    !q &&
+    folders.length === 0 &&
+    photos.length === 0 &&
+    pairs.length === 0 &&
+    documents.length === 0;
   const isEmptyButFiltered =
-    isEmpty && q && (folders.length > 0 || photos.length > 0 || pairs.length > 0);
+    isEmpty &&
+    q &&
+    (folders.length > 0 ||
+      photos.length > 0 ||
+      pairs.length > 0 ||
+      documents.length > 0);
   const currentFolderName =
     breadcrumb.length > 0 ? breadcrumb[breadcrumb.length - 1].name : "All photos";
 
@@ -870,7 +1046,7 @@ export default function Gallery() {
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*,video/*"
+        accept={`image/*,video/*,${SUPPORTED_DOCUMENT_EXTENSIONS.join(",")}`}
         multiple
         className="sr-only"
         tabIndex={-1}
@@ -990,6 +1166,9 @@ export default function Gallery() {
                   filteredPhotos.length > 0
                     ? `${filteredPhotos.length} ${filteredPhotos.length === 1 ? "photo" : "photos"}`
                     : null,
+                  filteredDocuments.length > 0
+                    ? `${filteredDocuments.length} ${filteredDocuments.length === 1 ? "document" : "documents"}`
+                    : null,
                 ]
                   .filter(Boolean)
                   .join(" · ")}
@@ -1108,6 +1287,7 @@ export default function Gallery() {
                     photoIds: Array.from(selectedPhotoIds),
                     pairIds: Array.from(selectedPairIds),
                     folderIds: Array.from(selectedFolderIds),
+                    documentIds: Array.from(selectedDocumentIds),
                     label: `${selectionCount} ${selectionCount === 1 ? "item" : "items"}`,
                   });
                 }}
@@ -1237,10 +1417,36 @@ export default function Gallery() {
             </section>
           )}
 
+          {/* Documents section */}
+          {!isLoading && filteredDocuments.length > 0 && (
+            <section className="mb-7" data-testid="documents-section">
+              <h2 className="text-xs uppercase tracking-wider text-muted-foreground font-medium mb-3">
+                Documents
+              </h2>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2.5">
+                {filteredDocuments.map((doc) => (
+                  <DocumentCard
+                    key={doc.id}
+                    doc={doc}
+                    onOpen={() => setSelectedDocument(doc as DocumentLite)}
+                    onRename={() => setRenameDocumentTarget(doc)}
+                    onMove={() => setMoveTarget({ type: "document", document: doc })}
+                    onDelete={() => setPendingDeleteDocument(doc)}
+                    draggable={!pairingMode}
+                    onDragStart={(e) => handleItemDragStart(e, "document", doc.id)}
+                    selectMode={selectMode}
+                    isSelected={selectedDocumentIds.has(doc.id)}
+                    onToggleSelect={() => toggleDocumentSel(doc.id)}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+
           {/* Photos section */}
           {!isLoading && filteredPhotos.length > 0 && (
             <section data-testid="photos-section">
-              {(filteredFolders.length > 0 || filteredPairs.length > 0) && (
+              {(filteredFolders.length > 0 || filteredPairs.length > 0 || filteredDocuments.length > 0) && (
                 <h2 className="text-xs uppercase tracking-wider text-muted-foreground font-medium mb-3">
                   Photos
                 </h2>
@@ -1772,6 +1978,9 @@ export default function Gallery() {
         onMovePair={(pairId, folderId) =>
           movePairMutation.mutate({ id: pairId, folderId })
         }
+        onMoveDocument={(documentId, folderId) =>
+          moveDocumentMutation.mutate({ id: documentId, folderId })
+        }
         onMoveBulk={(input, destFolderId) =>
           bulkMoveMutation.mutate({ ...input, destFolderId })
         }
@@ -1779,9 +1988,59 @@ export default function Gallery() {
           movePhotoMutation.isPending ||
           moveFolderMutation.isPending ||
           movePairMutation.isPending ||
+          moveDocumentMutation.isPending ||
           bulkMoveMutation.isPending
         }
       />
+
+      {/* Document viewer */}
+      <DocumentViewer
+        doc={selectedDocument}
+        onClose={() => setSelectedDocument(null)}
+      />
+
+      {/* Rename document dialog */}
+      <RenameDocumentDialog
+        doc={renameDocumentTarget}
+        onClose={() => setRenameDocumentTarget(null)}
+        onRename={(id, originalName) =>
+          renameDocumentMutation.mutate({ id, originalName })
+        }
+        isPending={renameDocumentMutation.isPending}
+      />
+
+      {/* Delete document confirmation */}
+      <AlertDialog
+        open={pendingDeleteDocument !== null}
+        onOpenChange={(open) => !open && setPendingDeleteDocument(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this document?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently remove
+              {pendingDeleteDocument ? ` “${pendingDeleteDocument.originalName}”` : " this file"}
+              {" "}from your library. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="button-cancel-delete-document">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (pendingDeleteDocument)
+                  deleteDocumentMutation.mutate(pendingDeleteDocument.id);
+                setPendingDeleteDocument(null);
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              data-testid="button-confirm-delete-document"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Pair lightbox */}
       {selectedPair && (() => {
@@ -2224,6 +2483,7 @@ function MoveDialog({
   onMovePhoto,
   onMoveFolder,
   onMovePair,
+  onMoveDocument,
   onMoveBulk,
   isPending,
 }: {
@@ -2231,14 +2491,23 @@ function MoveDialog({
     | { type: "photo"; photo: Photo }
     | { type: "folder"; folder: Folder }
     | { type: "pair"; pair: PairWithPhotos }
-    | { type: "bulk"; photoIds: number[]; pairIds: number[]; folderIds: number[]; label: string }
+    | { type: "document"; document: DocumentWithUrls }
+    | {
+        type: "bulk";
+        photoIds: number[];
+        pairIds: number[];
+        folderIds: number[];
+        documentIds: number[];
+        label: string;
+      }
     | null;
   onClose: () => void;
   onMovePhoto: (photoId: number, folderId: number | null) => void;
   onMoveFolder: (folderId: number, parentId: number | null) => void;
   onMovePair: (pairId: number, folderId: number | null) => void;
+  onMoveDocument: (documentId: number, folderId: number | null) => void;
   onMoveBulk: (
-    input: { photoIds: number[]; pairIds: number[]; folderIds: number[] },
+    input: { photoIds: number[]; pairIds: number[]; folderIds: number[]; documentIds: number[] },
     destFolderId: number | null
   ) => void;
   isPending: boolean;
@@ -2294,7 +2563,9 @@ function MoveDialog({
         ? target.folder.parentId
         : target?.type === "pair"
           ? target.pair.folderId
-          : null;
+          : target?.type === "document"
+            ? target.document.folderId
+            : null;
 
   const handlePick = (destId: number | null) => {
     if (!target) return;
@@ -2305,12 +2576,14 @@ function MoveDialog({
     if (target.type === "photo") onMovePhoto(target.photo.id, destId);
     else if (target.type === "folder") onMoveFolder(target.folder.id, destId);
     else if (target.type === "pair") onMovePair(target.pair.id, destId);
+    else if (target.type === "document") onMoveDocument(target.document.id, destId);
     else if (target.type === "bulk") {
       onMoveBulk(
         {
           photoIds: target.photoIds,
           pairIds: target.pairIds,
           folderIds: target.folderIds,
+          documentIds: target.documentIds,
         },
         destId
       );
@@ -2324,9 +2597,11 @@ function MoveDialog({
         ? target.folder.name
         : target?.type === "pair"
           ? target.pair.name ?? `${target.pair.leftPhoto.originalName} · ${target.pair.rightPhoto.originalName}`
-          : target?.type === "bulk"
-            ? target.label
-            : "";
+          : target?.type === "document"
+            ? target.document.originalName
+            : target?.type === "bulk"
+              ? target.label
+              : "";
 
   return (
     <Dialog open={target !== null} onOpenChange={(o) => !o && onClose()}>
@@ -2459,5 +2734,209 @@ function FolderTreeItem({
         <span className="text-xs text-muted-foreground shrink-0">Current</span>
       )}
     </button>
+  );
+}
+
+// ---------- document card ----------
+
+function DocumentCard({
+  doc,
+  onOpen,
+  onRename,
+  onMove,
+  onDelete,
+  draggable,
+  onDragStart,
+  selectMode,
+  isSelected,
+  onToggleSelect,
+}: {
+  doc: DocumentWithUrls;
+  onOpen: () => void;
+  onRename: () => void;
+  onMove: () => void;
+  onDelete: () => void;
+  draggable?: boolean;
+  onDragStart?: (e: React.DragEvent) => void;
+  selectMode?: boolean;
+  isSelected?: boolean;
+  onToggleSelect?: () => void;
+}) {
+  const Icon = docIconFor(doc.docType);
+  const accentByType: Record<string, string> = {
+    pdf: "bg-red-500/10 text-red-600 dark:text-red-400",
+    docx: "bg-blue-500/10 text-blue-600 dark:text-blue-400",
+    docm: "bg-blue-500/10 text-blue-600 dark:text-blue-400",
+    xlsx: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+    xlsm: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+    other: "bg-muted text-muted-foreground",
+  };
+  const accent = accentByType[doc.docType] ?? accentByType.other;
+  return (
+    <div
+      draggable={draggable}
+      onDragStart={onDragStart}
+      className={`group relative border border-card-border rounded-lg bg-card hover-elevate transition-colors ${
+        isSelected ? "ring-2 ring-primary" : ""
+      }`}
+      data-testid={`document-${doc.id}`}
+    >
+      {selectMode && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleSelect?.();
+          }}
+          className={`absolute top-1.5 left-1.5 z-10 h-5 w-5 rounded border-2 flex items-center justify-center transition-colors ${
+            isSelected
+              ? "bg-primary border-primary text-primary-foreground"
+              : "bg-background/90 border-muted-foreground"
+          }`}
+          aria-label={isSelected ? `Deselect ${doc.originalName}` : `Select ${doc.originalName}`}
+          data-testid={`checkbox-document-${doc.id}`}
+        >
+          {isSelected && <Check className="h-3 w-3" />}
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={selectMode ? onToggleSelect : onOpen}
+        className="w-full flex items-center gap-3 p-3 text-left"
+        data-testid={`button-open-document-${doc.id}`}
+        aria-label={selectMode ? `Toggle selection of ${doc.originalName}` : `Open ${doc.originalName}`}
+      >
+        <div className={`flex-shrink-0 w-9 h-9 rounded-md flex items-center justify-center ${accent}`}>
+          <Icon className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p
+            className="text-sm font-medium truncate"
+            data-testid={`text-document-name-${doc.id}`}
+          >
+            {doc.originalName}
+          </p>
+          <p className="text-xs text-muted-foreground truncate">
+            {docTypeLabel(doc)}
+            {doc.size ? ` · ${formatBytes(doc.size)}` : ""}
+          </p>
+        </div>
+      </button>
+
+      <div className="absolute top-1.5 right-1.5">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex items-center justify-center h-7 w-7 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+              aria-label={`Actions for ${doc.originalName}`}
+              data-testid={`button-document-menu-${doc.id}`}
+            >
+              <MoreVertical className="h-4 w-4" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-44">
+            <DropdownMenuItem onClick={onOpen} data-testid={`menu-doc-open-${doc.id}`}>
+              <FileText className="h-4 w-4 mr-2" />
+              Open
+            </DropdownMenuItem>
+            {doc.downloadUrl && (
+              <DropdownMenuItem asChild data-testid={`menu-doc-download-${doc.id}`}>
+                <a href={doc.downloadUrl} target="_self" rel="noopener">
+                  <Download className="h-4 w-4 mr-2" />
+                  Download
+                </a>
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuItem onClick={onRename} data-testid={`menu-doc-rename-${doc.id}`}>
+              <Pencil className="h-4 w-4 mr-2" />
+              Rename
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={onMove} data-testid={`menu-doc-move-${doc.id}`}>
+              <FolderInput className="h-4 w-4 mr-2" />
+              Move
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={onDelete}
+              className="text-destructive focus:text-destructive"
+              data-testid={`menu-doc-delete-${doc.id}`}
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </div>
+  );
+}
+
+// ---------- rename document dialog ----------
+
+function RenameDocumentDialog({
+  doc,
+  onClose,
+  onRename,
+  isPending,
+}: {
+  doc: DocumentWithUrls | null;
+  onClose: () => void;
+  onRename: (id: number, originalName: string) => void;
+  isPending: boolean;
+}) {
+  const [name, setName] = useState("");
+  useEffect(() => {
+    if (doc) setName(doc.originalName);
+  }, [doc]);
+
+  const submit = () => {
+    if (!doc) return;
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === doc.originalName) {
+      onClose();
+      return;
+    }
+    onRename(doc.id, trimmed);
+  };
+
+  return (
+    <Dialog open={doc !== null} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Rename document</DialogTitle>
+        </DialogHeader>
+        <div className="grid gap-2 py-2">
+          <Label htmlFor="rename-document-name">File name</Label>
+          <Input
+            id="rename-document-name"
+            value={name}
+            autoFocus
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submit();
+              }
+            }}
+            maxLength={200}
+            data-testid="input-rename-document"
+          />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} data-testid="button-cancel-rename-document">
+            Cancel
+          </Button>
+          <Button
+            onClick={submit}
+            disabled={isPending || !name.trim()}
+            data-testid="button-confirm-rename-document"
+          >
+            {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

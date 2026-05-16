@@ -1,5 +1,5 @@
-import { photos, folders, pairs } from '@shared/schema';
-import type { Photo, InsertPhoto, Folder, InsertFolder, Pair, InsertPair, PairWithPhotos } from '@shared/schema';
+import { photos, folders, pairs, documents } from '@shared/schema';
+import type { Photo, InsertPhoto, Folder, InsertFolder, Pair, InsertPair, PairWithPhotos, Document, InsertDocument } from '@shared/schema';
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { eq, desc, isNull, and, asc, inArray } from "drizzle-orm";
@@ -38,6 +38,19 @@ sqlite.exec(`
     folder_id INTEGER,
     created_at INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    uploaded_at INTEGER NOT NULL,
+    folder_id INTEGER,
+    cloudinary_public_id TEXT,
+    doc_type TEXT NOT NULL DEFAULT 'other',
+    page_count INTEGER
+  );
 `);
 
 // Migrations: add columns to photos if missing (for users with old DB)
@@ -57,6 +70,24 @@ try {
   }
   if (!cols.some((c) => c.name === "duration")) {
     sqlite.exec(`ALTER TABLE photos ADD COLUMN duration INTEGER`);
+  }
+} catch {
+  // ignore
+}
+
+// Migrations: ensure documents columns are up-to-date for older installs
+try {
+  const docCols = sqlite.prepare(`PRAGMA table_info(documents)`).all() as Array<{ name: string }>;
+  if (docCols.length > 0) {
+    if (!docCols.some((c) => c.name === "cloudinary_public_id")) {
+      sqlite.exec(`ALTER TABLE documents ADD COLUMN cloudinary_public_id TEXT`);
+    }
+    if (!docCols.some((c) => c.name === "doc_type")) {
+      sqlite.exec(`ALTER TABLE documents ADD COLUMN doc_type TEXT NOT NULL DEFAULT 'other'`);
+    }
+    if (!docCols.some((c) => c.name === "page_count")) {
+      sqlite.exec(`ALTER TABLE documents ADD COLUMN page_count INTEGER`);
+    }
   }
 } catch {
   // ignore
@@ -87,7 +118,13 @@ export interface IStorage {
   renamePair(id: number, name: string | null): Promise<Pair | undefined>;
   movePair(id: number, folderId: number | null): Promise<PairWithPhotos | undefined>;
   deletePair(id: number, removePhotos: boolean): Promise<{ filenamesRemoved: string[]; cloudinaryAssetsRemoved: Array<{ publicId: string; resourceType: string }> }>;
-  // Helper to look up which folders contain pairs (for recursive deletes)
+  // Documents
+  listDocuments(folderId: number | null): Promise<Document[]>;
+  getDocument(id: number): Promise<Document | undefined>;
+  createDocument(doc: InsertDocument): Promise<Document>;
+  renameDocument(id: number, originalName: string): Promise<Document | undefined>;
+  moveDocument(id: number, folderId: number | null): Promise<Document | undefined>;
+  deleteDocument(id: number): Promise<{ filename: string; cloudinaryPublicId: string | null } | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -182,6 +219,25 @@ export class DatabaseStorage implements IStorage {
       db.delete(photos).where(eq(photos.folderId, fId)).run();
       // also delete pairs that were anchored in this folder
       db.delete(pairs).where(eq(pairs.folderId, fId)).run();
+      // and delete documents anchored in this folder (capture their assets too)
+      const docRows = db
+        .select({
+          filename: documents.filename,
+          cloudinaryPublicId: documents.cloudinaryPublicId,
+        })
+        .from(documents)
+        .where(eq(documents.folderId, fId))
+        .all();
+      for (const d of docRows) {
+        photoFilenames.push(d.filename);
+        if (d.cloudinaryPublicId) {
+          cloudinaryAssets.push({
+            publicId: d.cloudinaryPublicId,
+            resourceType: "raw",
+          });
+        }
+      }
+      db.delete(documents).where(eq(documents.folderId, fId)).run();
     }
     // Delete folders bottom-up (children first)
     for (const fId of [...folderIds].reverse()) {
@@ -385,7 +441,51 @@ export class DatabaseStorage implements IStorage {
         .run();
     }
     db.delete(pairs).where(eq(pairs.id, id)).run();
-    return { filenamesRemoved, cloudinaryIdsRemoved };
+    return { filenamesRemoved, cloudinaryAssetsRemoved };
+  }
+  // ---------- Documents ----------
+
+  async listDocuments(folderId: number | null): Promise<Document[]> {
+    const query = db.select().from(documents);
+    if (folderId === null) {
+      return query.where(isNull(documents.folderId)).orderBy(desc(documents.uploadedAt)).all();
+    }
+    return query.where(eq(documents.folderId, folderId)).orderBy(desc(documents.uploadedAt)).all();
+  }
+
+  async getDocument(id: number): Promise<Document | undefined> {
+    return db.select().from(documents).where(eq(documents.id, id)).get();
+  }
+
+  async createDocument(doc: InsertDocument): Promise<Document> {
+    return db.insert(documents).values(doc).returning().get();
+  }
+
+  async renameDocument(id: number, originalName: string): Promise<Document | undefined> {
+    return db
+      .update(documents)
+      .set({ originalName })
+      .where(eq(documents.id, id))
+      .returning()
+      .get();
+  }
+
+  async moveDocument(id: number, folderId: number | null): Promise<Document | undefined> {
+    return db
+      .update(documents)
+      .set({ folderId })
+      .where(eq(documents.id, id))
+      .returning()
+      .get();
+  }
+
+  async deleteDocument(
+    id: number
+  ): Promise<{ filename: string; cloudinaryPublicId: string | null } | undefined> {
+    const existing = db.select().from(documents).where(eq(documents.id, id)).get();
+    if (!existing) return undefined;
+    db.delete(documents).where(eq(documents.id, id)).run();
+    return { filename: existing.filename, cloudinaryPublicId: existing.cloudinaryPublicId ?? null };
   }
 }
 

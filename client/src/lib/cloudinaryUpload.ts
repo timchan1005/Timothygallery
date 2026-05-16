@@ -4,7 +4,25 @@
 
 import { API_BASE, apiRequest } from "./queryClient";
 
-export type CldResourceType = "image" | "video";
+export type CldResourceType = "image" | "video" | "raw";
+
+export const SUPPORTED_DOCUMENT_EXTENSIONS = [".pdf", ".docx", ".docm", ".xlsx", ".xlsm"] as const;
+export type DocType = "pdf" | "docx" | "docm" | "xlsx" | "xlsm";
+
+export function isDocumentFile(file: File): boolean {
+  const lower = file.name.toLowerCase();
+  return SUPPORTED_DOCUMENT_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+export function docTypeFromFile(file: File): DocType | null {
+  const lower = file.name.toLowerCase();
+  if (lower.endsWith(".pdf")) return "pdf";
+  if (lower.endsWith(".docx")) return "docx";
+  if (lower.endsWith(".docm")) return "docm";
+  if (lower.endsWith(".xlsx")) return "xlsx";
+  if (lower.endsWith(".xlsm")) return "xlsm";
+  return null;
+}
 
 export interface CloudinarySignPayload {
   apiKey: string;
@@ -166,6 +184,83 @@ export async function uploadFilesDirect(
       reportProgress();
       if (opts.onFileDone) opts.onFileDone(photo, idx);
       return photo;
+    })
+  );
+  return Promise.all(tasks);
+}
+
+// ---------------------------------------------------------------------------
+// Documents (PDF / Office)
+// ---------------------------------------------------------------------------
+
+export interface RegisteredDocument {
+  id: number;
+  url?: string | null;
+  downloadUrl?: string | null;
+  docType: DocType | "other";
+  [key: string]: unknown;
+}
+
+async function registerDocument(input: {
+  cloudinaryPublicId: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+  folderId?: number | null;
+}): Promise<RegisteredDocument> {
+  const res = await apiRequest("POST", "/api/documents/register", input);
+  return (await res.json()) as RegisteredDocument;
+}
+
+/**
+ * Upload a single document file directly to Cloudinary (resource_type=raw)
+ * and persist it via /api/documents/register.
+ */
+export async function uploadDocumentDirect(
+  file: File,
+  opts: { folderId?: number | null; onProgress?: (fraction: number) => void } = {}
+): Promise<RegisteredDocument> {
+  const sig = await fetchSignature("raw");
+  const result = await postToCloudinary(file, sig, (loaded, total) => {
+    if (opts.onProgress) opts.onProgress(total > 0 ? loaded / total : 0);
+  });
+  return registerDocument({
+    cloudinaryPublicId: (result as any).public_id,
+    originalName: file.name,
+    mimeType: file.type || "application/octet-stream",
+    size: (result as any).bytes ?? file.size,
+    folderId: opts.folderId ?? null,
+  });
+}
+
+export async function uploadDocumentsDirect(
+  files: File[],
+  opts: {
+    folderId?: number | null;
+    onProgress?: (fraction: number) => void;
+    onFileDone?: (doc: RegisteredDocument, index: number) => void;
+  } = {}
+): Promise<RegisteredDocument[]> {
+  const totals = files.map((f) => f.size || 1);
+  const totalBytes = totals.reduce((a, b) => a + b, 0);
+  const perFileLoaded = new Array(files.length).fill(0);
+  const reportProgress = () => {
+    if (!opts.onProgress) return;
+    const loaded = perFileLoaded.reduce((a, b) => a + b, 0);
+    opts.onProgress(totalBytes > 0 ? loaded / totalBytes : 0);
+  };
+  const tasks = files.map((file, idx) =>
+    uploadDocumentDirect(file, {
+      folderId: opts.folderId ?? null,
+      onProgress: (frac) => {
+        perFileLoaded[idx] = (totals[idx] || 1) * frac;
+        reportProgress();
+      },
+    }).then((doc) => {
+      perFileLoaded[idx] = totals[idx] || 1;
+      reportProgress();
+      if (opts.onFileDone) opts.onFileDone(doc, idx);
+      return doc;
     })
   );
   return Promise.all(tasks);
