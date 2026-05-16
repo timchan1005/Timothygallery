@@ -20,7 +20,7 @@ import {
 // Lazy imports so we don't pay the cost unless the viewer opens
 // pdfjs-dist v4 ships ESM only — we import the legacy build for broadest compatibility.
 import * as pdfjsLib from "pdfjs-dist";
-// @ts-expect-error — vite handles ?url
+// vite handles ?url
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;

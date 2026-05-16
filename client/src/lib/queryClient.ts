@@ -1,5 +1,9 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 
+// On Vercel, frontend and API share the same origin — use relative URLs.
+// On the Perplexity Computer sandbox, the build step rewrites __PORT_5000__ to
+// the proxy path. Keeping both code paths means the same bundle works in both
+// environments without rebuilding.
 export const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
 // In-memory auth token. Cleared on full page reload (cookies/localStorage blocked in sandbox).

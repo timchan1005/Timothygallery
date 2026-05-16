@@ -6,7 +6,7 @@ import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { z } from "zod";
-import type { Photo, Folder, Document as DocumentRecord } from "@shared/schema";
+import type { Photo, Folder, Document as DocumentRecord } from "../shared/schema";
 import {
   cloudinaryConfigured,
   uploadBufferToCloudinary,
@@ -20,10 +20,24 @@ import {
   type CldResourceType,
 } from "./cloudinary";
 
-const UPLOAD_DIR = path.resolve(process.cwd(), "uploads");
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+// On Vercel, only /tmp is writable. We don't actually persist uploads to disk
+// in production (everything goes to Cloudinary via memoryStorage), but multer's
+// diskStorage engine is still constructed below for legacy fallback paths.
+// Lazily create the directory only if/when something tries to write to it.
+const UPLOAD_DIR =
+  process.env.VERCEL === "1"
+    ? path.resolve("/tmp", "uploads")
+    : path.resolve(process.cwd(), "uploads");
+function ensureUploadDir() {
+  try {
+    if (!fs.existsSync(UPLOAD_DIR)) {
+      fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+    }
+  } catch {
+    // Read-only FS — ignore; Cloudinary memory uploads don't need this.
+  }
 }
+ensureUploadDir();
 
 // Cloudinary uploads go through memory storage; disk fallback writes to UPLOAD_DIR.
 const diskStorageEngine = multer.diskStorage({
@@ -147,32 +161,74 @@ const GALLERY_PASSWORD = process.env.GALLERY_PASSWORD;
 if (!GALLERY_PASSWORD) {
   console.warn("[auth] GALLERY_PASSWORD is not set. Login will be disabled until you create a .env file with GALLERY_PASSWORD=<your password>. See .env.example.");
 }
-const activeTokens = new Set<string>();
 
-function issueToken(): string {
-  const t = crypto.randomBytes(32).toString("hex");
-  activeTokens.add(t);
-  return t;
+// Stateless HMAC tokens — they survive serverless cold starts (no shared memory).
+// AUTH_SECRET should be set in production; we derive a per-instance fallback in
+// dev so login still works locally without configuration.
+const AUTH_SECRET =
+  process.env.AUTH_SECRET ||
+  (GALLERY_PASSWORD ? `gallery-${GALLERY_PASSWORD}` : "") ||
+  crypto.randomBytes(32).toString("hex");
+const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+function signToken(payload: { exp: number }): string {
+  const body = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const sig = crypto
+    .createHmac("sha256", AUTH_SECRET)
+    .update(body)
+    .digest("base64url");
+  return `${body}.${sig}`;
 }
 
-function requireAuth(req: Request, res: Response, next: () => void) {
-  // Mounted at /api, so req.path here lacks the /api prefix.
-  // Allow /photos/:id/raw|download AND /documents/:id/raw|download with token in query
-  // string (so <img src>, <a download>, and pdf.js fetch can authenticate via URL only).
+function verifyToken(token: string): { ok: boolean; exp?: number } {
+  if (!token) return { ok: false };
+  const dot = token.indexOf(".");
+  if (dot < 0) return { ok: false };
+  const body = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = crypto
+    .createHmac("sha256", AUTH_SECRET)
+    .update(body)
+    .digest("base64url");
+  // Constant-time compare
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return { ok: false };
+  try {
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (typeof payload?.exp !== "number") return { ok: false };
+    if (Date.now() > payload.exp) return { ok: false };
+    return { ok: true, exp: payload.exp };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function issueToken(): string {
+  return signToken({ exp: Date.now() + TOKEN_TTL_MS });
+}
+
+function tokenFromRequest(req: Request): string {
+  // Allow query token for /photos/:id/raw|download and /documents/:id/raw|download
   if (/^\/?(photos|documents)\/\d+\/(raw|download)$/.test(req.path)) {
     const qt = typeof req.query.t === "string" ? req.query.t : "";
-    if (activeTokens.has(qt)) return next();
+    if (qt) return qt;
   }
   const auth = req.headers.authorization || "";
   const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (m && activeTokens.has(m[1])) return next();
+  return m ? m[1] : "";
+}
+
+function requireAuth(req: Request, res: Response, next: () => void) {
+  const tok = tokenFromRequest(req);
+  if (verifyToken(tok).ok) return next();
   res.status(401).json({ message: "Unauthorized" });
 }
 
 export async function registerRoutes(
-  httpServer: Server,
+  httpServer: Server | null,
   app: Express
-): Promise<Server> {
+): Promise<Server | null> {
   // ---------- AUTH ROUTES ----------
   app.post("/api/auth/login", (req, res) => {
     if (!GALLERY_PASSWORD) {
@@ -186,17 +242,15 @@ export async function registerRoutes(
     res.json({ token });
   });
 
-  app.post("/api/auth/logout", (req, res) => {
-    const auth = req.headers.authorization || "";
-    const m = auth.match(/^Bearer\s+(.+)$/i);
-    if (m) activeTokens.delete(m[1]);
+  app.post("/api/auth/logout", (_req, res) => {
+    // Stateless tokens — logout is a client-side concern (drop the token).
+    // Returning 204 keeps the existing client contract.
     res.status(204).end();
   });
 
   app.get("/api/auth/verify", (req, res) => {
-    const auth = req.headers.authorization || "";
-    const m = auth.match(/^Bearer\s+(.+)$/i);
-    if (m && activeTokens.has(m[1])) return res.json({ ok: true });
+    const tok = tokenFromRequest(req);
+    if (verifyToken(tok).ok) return res.json({ ok: true });
     res.status(401).json({ ok: false });
   });
 
@@ -621,7 +675,7 @@ export async function registerRoutes(
     res: Response,
     disposition: "inline" | "attachment"
   ) {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (Number.isNaN(id)) {
       return res.status(400).json({ message: "Bad id" });
     }
