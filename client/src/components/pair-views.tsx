@@ -325,7 +325,13 @@ export function PairLightbox({
         </button>
       </div>
 
-      <div className="flex-1 relative flex items-center justify-center px-2 sm:px-4 pb-2">
+      <div
+        className={`flex-1 relative min-h-0 px-2 sm:px-4 pb-2 ${
+          mode === "side"
+            ? "overflow-y-auto sm:overflow-hidden sm:flex sm:items-center sm:justify-center"
+            : "flex items-center justify-center overflow-hidden"
+        }`}
+      >
         {mode === "side" ? (
           <SideBySideView pair={pair} />
         ) : (
@@ -367,22 +373,22 @@ export function PairLightbox({
 function SideBySideView({ pair }: { pair: PairWithPhotos }) {
   return (
     <div
-      className="w-full h-full flex flex-col sm:flex-row items-stretch justify-center gap-2 sm:gap-3"
+      className="w-full sm:h-full flex flex-col sm:flex-row items-stretch justify-center gap-3"
       data-testid="pair-view-side"
     >
-      <div className="flex-1 min-h-0 relative flex items-center justify-center">
+      <div className="min-h-[60vh] sm:min-h-0 sm:flex-1 relative flex items-center justify-center">
         <PairMedia
           photo={pair.leftPhoto}
           controls
-          className="max-w-full max-h-full object-contain select-none"
+          className="max-w-full max-h-[80vh] sm:max-h-full object-contain select-none"
           testId="img-pair-left"
         />
       </div>
-      <div className="flex-1 min-h-0 relative flex items-center justify-center">
+      <div className="min-h-[60vh] sm:min-h-0 sm:flex-1 relative flex items-center justify-center">
         <PairMedia
           photo={pair.rightPhoto}
           controls
-          className="max-w-full max-h-full object-contain select-none"
+          className="max-w-full max-h-[80vh] sm:max-h-full object-contain select-none"
           testId="img-pair-right"
         />
       </div>
