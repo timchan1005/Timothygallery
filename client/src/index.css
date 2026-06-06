@@ -49,7 +49,8 @@
   --chart-4: 43 70% 55%;
   --chart-5: 12 70% 55%;
 
-  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-sans: 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-display: 'Outfit', 'Geist', ui-sans-serif, system-ui, sans-serif;
   --font-serif: Georgia, serif;
   --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
   --radius: 0.75rem;
@@ -361,4 +362,17 @@
   position: sticky;
   top: 0;
   z-index: 1;
+}
+
+/* Respect users who prefer reduced motion: keep functional opacity changes
+   but neutralize transforms, durations, and looping animations. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

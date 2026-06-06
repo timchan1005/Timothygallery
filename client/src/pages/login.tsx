@@ -37,13 +37,13 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background px-4">
+    <div className="min-h-[100dvh] flex items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm">
         <div className="flex flex-col items-center text-center mb-8">
           <div className="h-12 w-12 rounded-full bg-primary/10 text-primary flex items-center justify-center mb-4">
             <Lock className="h-5 w-5" />
           </div>
-          <h1 className="text-xl font-semibold tracking-tight">Lumen</h1>
+          <h1 className="font-display text-xl font-semibold tracking-tight">Lumen</h1>
           <p className="text-sm text-muted-foreground mt-1">
             Enter the password to view your photos.
           </p>

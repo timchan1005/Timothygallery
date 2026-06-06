@@ -177,7 +177,7 @@ function Logo() {
           fill="none"
         />
       </svg>
-      <span className="text-base font-semibold tracking-tight">Lumen</span>
+      <span className="font-display text-base font-semibold tracking-tight">Lumen</span>
     </div>
   );
 }
@@ -1166,7 +1166,7 @@ export default function Gallery() {
           <div className="mb-5 flex items-center justify-between flex-wrap gap-2">
             <div className="flex items-baseline gap-2">
               <h1
-                className="text-xl font-semibold tracking-tight"
+                className="font-display text-xl font-semibold tracking-tight"
                 data-testid="text-page-title"
               >
                 {q ? "Search" : currentFolderName}
